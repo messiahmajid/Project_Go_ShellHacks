@@ -108,6 +108,38 @@ nonisolated enum GoTextFields {
         return text
     }
 
+    /// Puts the keyboard focus in the text field at `rect`, as clicking into it
+    /// would, so typing and Return land there. True when the app's focus is then
+    /// a typeable field over `rect`. Never used on a password field.
+    static func focusField(at rect: CGRect, app bundleIdentifier: String) -> Bool {
+        let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.25)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(rect.midX), Float(primaryHeight - rect.midY), &hit) == .success,
+              var element = hit else { return false }
+        // The hit may be text or an image inside the field; walk up to the field.
+        for _ in 0..<3 where !isTypeable(element) {
+            guard let parent: AXUIElement = value(element, kAXParentAttribute) else { return false }
+            element = parent
+        }
+        guard isTypeable(element) else { return false }
+        _ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        return focusIsField(at: rect, app: bundleIdentifier)
+    }
+
+    /// Whether the app's keyboard focus is a typeable field over `rect`.
+    static func focusIsField(at rect: CGRect, app bundleIdentifier: String) -> Bool {
+        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else { return false }
+        let application = AXUIElementCreateApplication(running.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.25)
+        guard let focused: AXUIElement = value(application, kAXFocusedUIElementAttribute), isTypeable(focused),
+              let axFrame = AccessibilityTreeWalker.copyFrame(from: focused).frame else { return false }
+        let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let frame = AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(axFrame, primaryDisplayHeightInPoints: primaryHeight)
+        return frame.insetBy(dx: -4, dy: -4).intersects(rect)
+    }
+
     /// Presses Return in the app's focused text field, after Go typed into it on
     /// a step the planner marked as needing Return. Only when that app is in front
     /// and its focused element is a typeable, non-password field.

@@ -88,6 +88,9 @@ nonisolated enum GoStepExecutor {
             step.launchApp = bundleIdentifier
         }
         guard let line = requestLine(for: step) else { return .blocked("I can't act on that control myself") }
+        // Typing into a field starts by putting the cursor in it, as a person would,
+        // so the text and any Return land there, not wherever focus happened to be.
+        if step.typeText != nil, let field = step.field { await focus(field.frame, app: step.app) }
         // Apps whose buttons ignored an Accessibility press earlier (many web apps
         // listen only for real pointer events): ask the kernel first, then click.
         if step.control != nil, !step.opens, await GoPointerApps.contains(step.app),
@@ -137,6 +140,10 @@ nonisolated enum GoStepExecutor {
         if result == .done, step.typeText != nil, step.pressReturn {
             try? await Task.sleep(for: .milliseconds(150))
             let app = step.app
+            // Focus that moved away while typing goes back to the field first.
+            if let rect = step.field?.frame, !(await Task.detached(operation: { GoTextFields.focusIsField(at: rect, app: app) }).value) {
+                await focus(rect, app: app)
+            }
             guard await Task.detached(operation: { GoTextFields.pressReturn(app: app) }).value else {
                 return .retryable("I couldn't confirm the text with Return")
             }
@@ -188,6 +195,19 @@ nonisolated enum GoStepExecutor {
         if GoScreenClick.describeElement(at: point).isSecure { return .blocked("that's a password field") }
         guard GoScreenClick.click(at: point, count: 1, restoringPointer: false) else { return nil }
         return await leftTheApp(step) ?? .done
+    }
+
+    /// Focuses the field at `rect`: through Accessibility, or with a real click
+    /// into it when the app ignores that. Never clicks a password field.
+    private static func focus(_ rect: CGRect, app: String) async {
+        // Unit tests never click on the machine running them.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let focused = await Task.detached { GoTextFields.focusField(at: rect, app: app) }.value
+        guard !focused else { return }
+        let point = CGPoint(x: rect.midX, y: rect.midY)
+        guard !GoScreenClick.describeElement(at: point).isSecure,
+              GoScreenClick.click(at: point, count: 1, restoringPointer: false) else { return }
+        try? await Task.sleep(for: .milliseconds(150))
     }
 
     /// A click meant for the step's own app that brought another app to the front
