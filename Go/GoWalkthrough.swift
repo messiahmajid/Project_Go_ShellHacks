@@ -42,17 +42,62 @@ nonisolated struct GoObservation: Codable, Equatable, Sendable {
     /// those near the box (a box can be one icon off); otherwise the one under
     /// the box's centre. Nil when neither identifies exactly one.
     func systemControl(near rect: CGRect, label: String?) -> GoSystemControl? {
+        if case .snap(let control) = systemControlMatch(near: rect, label: label) { return control }
+        return nil
+    }
+
+    enum SystemControlMatch: Equatable {
+        /// The box means this Dock item or menu-bar icon.
+        case snap(GoSystemControl)
+        /// The box sits on this item, but the label describes something else:
+        /// the box is off target (often an app's bottom or top edge beside the Dock
+        /// or menu bar), and clicking it would act on another app.
+        case offTarget(GoSystemControl)
+        case none
+    }
+
+    func systemControlMatch(near rect: CGRect, label: String?) -> SystemControlMatch {
         let center = CGPoint(x: rect.midX, y: rect.midY)
         let nearby = systemControls.filter { control in
             let frame = control.frame.rect
             return frame.insetBy(dx: -max(rect.width, 40), dy: -max(rect.height, 24)).contains(center)
         }
+        let labelWords = Self.distinctiveWords(label ?? "")
         if let label = label?.lowercased(), !label.isEmpty {
-            let named = nearby.filter { label.contains($0.name.lowercased()) }
-            if named.count == 1 { return named[0] }
+            let named = nearby.filter { label.contains($0.name.lowercased()) || !labelWords.isDisjoint(with: Self.distinctiveWords($0.name)) }
+            if named.count == 1 { return .snap(named[0]) }
         }
         let under = nearby.filter { $0.frame.rect.contains(center) }
-        return under.count == 1 ? under[0] : nil
+        guard under.count == 1 else { return .none }
+        // A label with nothing specific in it ("the icon") takes the item under the box.
+        return labelWords.isEmpty ? .snap(under[0]) : .offTarget(under[0])
+    }
+
+    /// The words of a label that could name something: not "the", "icon", "button"…
+    static func distinctiveWords(_ text: String) -> Set<String> {
+        let generic: Set<String> = ["the", "and", "for", "with", "icon", "button", "item", "menu", "bar", "dock", "control",
+                                    "top", "bottom", "left", "right", "corner", "symbol", "logo", "app", "status", "extra",
+                                    "click", "open", "press", "tap", "select", "choose", "this", "that", "here", "there"]
+        let words = text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        return Set(words.filter { $0.count >= 3 && !generic.contains($0) })
+    }
+
+    /// The controls the planner is shown when there are too many to send them
+    /// all. Content (spreadsheet cells, table rows, file names, labels, images)
+    /// can run to thousands and would otherwise push the app's own commands
+    /// (buttons, tabs, menus, sheet tabs listed after a grid) out of the list,
+    /// leaving only screenshot guesses for them. Commands are kept first, with
+    /// room reserved for content; both keep their on-screen order.
+    static func catalogControls(_ controls: [GoControl], limit: Int = 200, contentShare: Int = 50) -> [GoControl] {
+        guard controls.count > limit else { return controls }
+        let contentRoles: Set<String> = ["AXCell", "AXRow", "AXStaticText", "AXImage", "AXTextField"]
+        let indexed = Array(controls.enumerated())
+        let commands = indexed.filter { !contentRoles.contains($0.element.role) }
+        let content = indexed.filter { contentRoles.contains($0.element.role) }
+        let contentSlots = min(content.count, max(contentShare, limit - commands.count))
+        let commandSlots = min(commands.count, limit - contentSlots)
+        let kept = commands.prefix(commandSlots) + content.prefix(limit - commandSlots)
+        return kept.sorted { $0.offset < $1.offset }.map(\.element)
     }
 
     /// A planner box [ymin, xmin, ymax, xmax] on 0–1000 over the screenshot,
@@ -272,6 +317,9 @@ nonisolated struct GoWalkthroughState: Sendable {
     private var offTrackAt: TimeInterval?
     /// One redirect per departure; reset once the owner is back on the step.
     private var offTrackReported = false
+    /// Set when the last proposal's screenshot box fell on a Dock item or
+    /// menu-bar icon its label doesn't name; the coordinator plans again.
+    private(set) var boxLandedOn: GoSystemControl?
 
     mutating func planning() { phase = .planning; step = nil; firstMatchAt = nil; offTrackAt = nil; offTrackReported = false }
 
@@ -316,6 +364,7 @@ nonisolated struct GoWalkthroughState: Sendable {
 
     mutating func accept(_ proposal: GoStepProposal, from observation: GoObservation) {
         app = observation.app
+        boxLandedOn = nil
         guard !proposal.instruction.isEmpty, proposal.instruction.count <= 240 else {
             return ask("I couldn't form a short, clear next step.")
         }
@@ -367,9 +416,17 @@ nonisolated struct GoWalkthroughState: Sendable {
                     return ask("I couldn't pin down where that is. Can you point me to it?")
                 }
                 rect = boxed
-                // A box on a listed menu-bar icon or Dock item uses that item's exact frame.
-                if let snapped = observation.systemControl(near: boxed, label: plannedLabel ?? proposal.instruction) {
+                // A box on a listed menu-bar icon or Dock item uses that item's exact frame,
+                // when the planner's label means that item. A label naming something
+                // else makes the box off target: never act on another app's icon.
+                switch observation.systemControlMatch(near: boxed, label: plannedLabel ?? proposal.instruction) {
+                case .snap(let snapped):
                     rect = snapped.frame.rect; label = plannedLabel ?? snapped.name; outside = true; outsideName = snapped.name
+                case .offTarget(let item):
+                    boxLandedOn = item
+                    return ask("I couldn't pin down where that is. Can you point me to it?")
+                case .none:
+                    break
                 }
             }
             guard proposal.kind == .step || proposal.kind == .point else {

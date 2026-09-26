@@ -497,8 +497,11 @@ struct BlueCursorView: View {
         let deltaY = endPosition.y - startPosition.y
         let distance = hypot(deltaX, deltaY)
 
-        // Duration scales with distance, clamped to 0.6-1.4 s.
-        let flightDurationSeconds = min(max(distance / 800.0, 0.6), 1.4)
+        // Duration scales with distance, clamped to 0.6-1.4 s; twice as fast while
+        // Go acts on its own, where every step waits for the landing.
+        let flightDurationSeconds = goController.isGoDriving
+            ? min(max(distance / 1600.0, 0.3), 0.7)
+            : min(max(distance / 800.0, 0.6), 1.4)
         let frameInterval: Double = 1.0 / 60.0
         let totalFrames = Int(flightDurationSeconds / frameInterval)
         var currentFrame = 0

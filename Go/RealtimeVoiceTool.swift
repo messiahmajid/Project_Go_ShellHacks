@@ -24,10 +24,14 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var path: [String]? = nil
     var goalRequest: GoGoalRequest? = nil
     var walkthroughRequest: GoWalkthroughRequest? = nil
+    var routinesRequest: GoRoutinesRequest? = nil
 
     static func parsed(callID: String, name: String, arguments: [String: Any]?) -> RealtimeToolCall {
         if name == GoWalkthroughTool.name {
             return RealtimeToolCall(callID: callID, name: name, appName: nil, walkthroughRequest: GoWalkthroughRequest(arguments))
+        }
+        if name == GoRoutinesTool.name {
+            return RealtimeToolCall(callID: callID, name: name, appName: nil, routinesRequest: GoRoutinesRequest(arguments))
         }
         if name == GoGoalTool.name {
             return RealtimeToolCall(callID: callID, name: name, appName: nil, goalRequest: GoGoalRequest(arguments: arguments))

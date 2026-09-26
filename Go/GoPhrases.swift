@@ -10,7 +10,7 @@ nonisolated struct GoPhrases: Sendable {
         .startForMe: ["Sure, on it.", "Okay, I'll take it from here.", "Got it, doing that now.", "On it."],
         .offTrack: ["Not quite.", "Almost, not that one.", "Close, but not that one."],
         .goBack: ["Let's go back.", "Let's try that again."],
-        .thinking: ["One sec…", "Looking…", "Checking…"],
+        .thinking: ["One sec…", "Let me look.", "Checking…", "Give me a second."],
     ]
     private var next: [Kind: Int] = [:]
 

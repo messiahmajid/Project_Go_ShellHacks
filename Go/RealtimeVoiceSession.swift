@@ -31,8 +31,12 @@ final class RealtimeVoiceSession {
                 // Acknowledge a finished step at once, while the next is still being planned.
                 // A reveal ("look for …") finishing only means the owner moved; praise
                 // is for real progress.
+                // Praise only what Go saw work: a typing step it finished without being
+                // able to read the field gets no "nice", since the next plan may redo it.
+                let guessed = self.guide.unconfirmedCompletion != nil && self.guide.unconfirmedCompletion == state.verifiedSteps.last
+                self.guide.unconfirmedCompletion = nil
                 let finishedStep = state.verifiedSteps.count > self.acknowledgedSteps && !self.walkthrough.autopilot
-                    && state.verifiedSteps.last?.reveal != true
+                    && state.verifiedSteps.last?.reveal != true && !guessed
                 self.acknowledgedSteps = state.verifiedSteps.count
                 if finishedStep {
                     let ack = self.phrases.say(.stepDone)
@@ -54,6 +58,8 @@ final class RealtimeVoiceSession {
         return coordinator
     }()
     private var phrases = GoPhrases()
+    /// Go asked "delete all your routines?" and waits for the owner's yes.
+    private var pendingDeleteAllRoutines = false
     private var acknowledgedSteps = 0
     /// Guide text goes in the blue cursor's bubble.
     var onGuideText: ((String?) -> Void)?
@@ -203,6 +209,22 @@ final class RealtimeVoiceSession {
             self.onStateChange?(.idle)
             self.queueSpeech(instruction, for: turn)
         }
+        // Routine requests the local check didn't recognise, routed by the model:
+        // handled exactly like the local ones, and spoken by Go.
+        connection.onRoutineRequest = { [weak self] request, heard, marks in
+            guard let self, let turn = self.liveTurn, turn.marks === marks,
+                  let intent = request.intent(names: self.routines.routines.map(\.name)) else { return false }
+            if case .list = intent {} else if heard == nil { return false }
+            guard let text = await self.handleRoutine(intent, heard: heard ?? "", turn: turn),
+                  self.liveTurn === turn else { return false }
+            marks.goHandlesTurn = true
+            marks.walkthroughReply = text
+            self.cancelQueuedSpeech(); turn.speechTasks.removeAll(); turn.speechBuffer = GoSpeechBuffer()
+            if self.walkthrough.state.phase != .waiting { self.onGuideText?(text) }
+            self.onStateChange?(.idle)
+            self.queueSpeech(text, for: turn)
+            return true
+        }
         connection.onTurnFinished = { [weak self] in
             self?.prewarm()
         }
@@ -231,6 +253,18 @@ final class RealtimeVoiceSession {
             }
         }
         turn.speechTasks.append(task)
+    }
+
+    /// While Go reads the screen and plans, a short spoken cue if that takes more
+    /// than a moment, so a slow first step isn't silence. Fast plans say nothing
+    /// extra. Cancel it once the real reply is ready.
+    /// `cue` is the text already shown, so the bubble and the voice match.
+    private func acknowledgeIfSlow(_ turn: LiveTurn, saying cue: String) -> Task<Void, Never> {
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1100))
+            guard !Task.isCancelled, let self, self.liveTurn === turn, turn.speechTasks.isEmpty else { return }
+            self.queueSpeech(cue, for: turn)
+        }
     }
 
     /// Everything Go says is also shown: the model's reply, sentence by sentence.
@@ -440,6 +474,13 @@ final class RealtimeVoiceSession {
             let names = routines.routines.map(\.name)
             guard !names.isEmpty else { return "You don't have any routines saved yet." }
             return "I don't have a routine called \u{201C}\(name)\u{201D}. You have " + names.joined(separator: ", ") + "."
+        case .deleteAll:
+            let count = routines.routines.count
+            guard count > 0 else { return "You don't have any routines saved." }
+            // Deleting is the one thing Go always checks first.
+            pendingDeleteAllRoutines = true
+            return count == 1 ? "Delete your one routine, \u{201C}\(routines.routines[0].name)\u{201D}? Say yes to confirm."
+                              : "Delete all \(count) routines? Say yes to confirm."
         case .delete(let name):
             return routines.delete(named: name) ? "Deleted \u{201C}\(name)\u{201D}." : "I couldn't delete that routine."
         case .run(let name), .walk(let name):
@@ -526,6 +567,24 @@ final class RealtimeVoiceSession {
             queueSpeech(text, for: turn)
             return true
         }
+        // The yes or no to "delete all your routines?"; anything else keeps them.
+        if liveTurn === turn, pendingDeleteAllRoutines {
+            pendingDeleteAllRoutines = false
+            if let answer = GoGuidanceIntent.yesNo(heard) {
+                marks.goHandlesTurn = true
+                marks.walkthroughReply = ""
+                cancelQueuedSpeech(); turn.speechTasks.removeAll(); turn.speechBuffer = GoSpeechBuffer()
+                turn.line.localIntent = "routine.deleteAll." + (answer ? "yes" : "no")
+                let deleted = answer && routines.deleteAll()
+                if deleted { recentRoutine = nil }
+                let text = !answer ? "Okay, I'll keep them." : deleted ? "Done, your routines are deleted." : "I couldn't delete them."
+                marks.walkthroughReply = text
+                onGuideText?(text)
+                onStateChange?(.idle)
+                queueSpeech(text, for: turn)
+                return true
+            }
+        }
         // Saved routines: save, run, walk through, list, delete.
         if liveTurn === turn, let heard,
            let intent = GoRoutineIntent.parse(heard, names: routines.routines.map(\.name), recent: recentRoutine),
@@ -547,9 +606,12 @@ final class RealtimeVoiceSession {
             guard saved["ok"] as? Bool == true else { marks.goHandlesTurn = false; return false }
             marks.walkthroughReply = ""
             cancelQueuedSpeech(); turn.speechTasks.removeAll(); turn.speechBuffer = GoSpeechBuffer()
-            onGuideText?(phrases.say(.thinking))
+            let cue = phrases.say(.thinking)
+            onGuideText?(cue)
+            let acknowledgement = acknowledgeIfSlow(turn, saying: cue)
             let resumeForMe = walkthrough.pausedForQuestion
             _ = await walkthrough.proceed(ownerAnswered: true)
+            acknowledgement.cancel()
             guard liveTurn === turn else { return true }
             if resumeForMe, walkthrough.state.phase == .waiting { pendingAutopilot = true }
             let state = walkthrough.state
@@ -567,7 +629,8 @@ final class RealtimeVoiceSession {
         cancelQueuedSpeech()
         turn.speechTasks.removeAll()
         turn.speechBuffer = GoSpeechBuffer()
-        onGuideText?(phrases.say(.thinking))
+        let cue = phrases.say(.thinking)
+        onGuideText?(cue)
         var reply: String?
         var task: String?
         var takesOver = false
@@ -603,7 +666,9 @@ final class RealtimeVoiceSession {
             if saved["ok"] as? Bool != true { reply = "I couldn't save that goal. Please try again." }
         }
         if reply == nil {
+            let acknowledgement = acknowledgeIfSlow(turn, saying: cue)
             let result = intent == .continueGoal ? await walkthrough.proceed() : await walkthrough.start()
+            acknowledgement.cancel()
             guard liveTurn === turn else { return true }
             let state = walkthrough.state
             if result["ok"] as? Bool == false { reply = result["message"] as? String }

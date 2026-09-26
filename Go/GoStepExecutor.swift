@@ -19,8 +19,14 @@ nonisolated enum GoStepExecutor {
         let app = step.app
         if let text = step.typeText {
             if let refusal = GoKeystrokes.keyboardRefusal(for: text, app: app) { return .blocked(refusal) }
-            guard await Task.detached(operation: { GoKeystrokes.type(text, app: app) }).value else {
-                return .retryable("I couldn't type there")
+            // Typing goes in at the cursor: when the field already holds the start of
+            // the text (the owner began it) only the rest is typed, and nothing when
+            // it's all there, so the text is never doubled.
+            let rest = await Task.detached(operation: { GoTextFields.remainder(of: text, after: GoTextFields.focusedContents(app: app)) }).value
+            if !rest.isEmpty {
+                guard await Task.detached(operation: { GoKeystrokes.type(rest, app: app) }).value else {
+                    return .retryable("I couldn't type there")
+                }
             }
         }
         if let keys = step.keys {
@@ -160,6 +166,7 @@ nonisolated enum GoStepExecutor {
             return .blocked(refusal)
         }
         guard GoScreenClick.click(at: point, count: step.opens ? 2 : 1, restoringPointer: false) else { return .retryable("I couldn't click there") }
+        if let wrongApp = await leftTheApp(step) { return wrongApp }
         guard let text = step.typeText else { return .done }
         try? await Task.sleep(for: .milliseconds(250))
         let typed = GoWalkthroughStep(instruction: step.instruction, app: GoActiveApp.bundleIdentifier ?? step.app,
@@ -175,7 +182,22 @@ nonisolated enum GoStepExecutor {
         guard let rect = await GoGuidePresenter.resolve(step, answer: answer) else { return nil }
         let point = CGPoint(x: rect.midX, y: rect.midY)
         if GoScreenClick.describeElement(at: point).isSecure { return .blocked("that's a password field") }
-        return GoScreenClick.click(at: point, count: 1, restoringPointer: false) ? .done : nil
+        guard GoScreenClick.click(at: point, count: 1, restoringPointer: false) else { return nil }
+        return await leftTheApp(step) ?? .done
+    }
+
+    /// A click meant for the step's own app that brought another app to the front
+    /// hit the wrong thing (a Dock icon beside a sheet tab, a notification). Put
+    /// the app back and report it, so Go re-plans instead of carrying on elsewhere.
+    /// Steps that are meant to leave the app (Dock and menu-bar items, opening a
+    /// file) are not checked.
+    private static func leftTheApp(_ step: GoWalkthroughStep) async -> Outcome? {
+        guard !step.outsideWindow, !step.opens else { return nil }
+        try? await Task.sleep(for: .milliseconds(250))
+        guard !GoActiveApp.isActive(step.app) else { return nil }
+        NSRunningApplication.runningApplications(withBundleIdentifier: step.app).first?.activate()
+        try? await Task.sleep(for: .milliseconds(300))
+        return .retryable("that click brought a different app to the front")
     }
 
     private static func withField(_ line: String, _ key: String, _ value: Any) -> String? {

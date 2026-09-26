@@ -111,6 +111,8 @@ final class RealtimeVoiceConnection {
     var onAudio: ((Data) -> Void)?
     var onTranscript: ((String, RealtimeTurnMarks) -> Void)?
     var onWalkthroughInstruction: ((String, RealtimeTurnMarks) -> Void)?
+    /// A routine request from the model; true when Go answered it (and speaks it).
+    var onRoutineRequest: ((GoRoutinesRequest, String?, RealtimeTurnMarks) async -> Bool)?
     var onTurnFinished: (() -> Void)?
     var onClosed: (() -> Void)?
 
@@ -130,11 +132,13 @@ final class RealtimeVoiceConnection {
     }
 
     private var systemPrompt: String {
-        RealtimeOpenAppTool.systemPrompt + (goalStore == nil ? "" : GoGoalTool.instructions) + (walkthrough == nil ? "" : GoWalkthroughTool.instructions)
+        RealtimeOpenAppTool.systemPrompt + (goalStore == nil ? "" : GoGoalTool.instructions)
+            + (walkthrough == nil ? "" : GoWalkthroughTool.instructions + GoRoutinesTool.instructions)
     }
 
     private var localDeclarations: [[String: Any]] {
-        (goalStore == nil ? [] : [GoGoalTool.declaration]) + (walkthrough == nil ? [] : [GoWalkthroughTool.declaration])
+        (goalStore == nil ? [] : [GoGoalTool.declaration])
+            + (walkthrough == nil ? [] : [GoWalkthroughTool.declaration, GoRoutinesTool.declaration])
     }
 
     private var geminiDeclaration: [String: Any] {
@@ -356,6 +360,21 @@ final class RealtimeVoiceConnection {
                         turn.walkthroughReply = instruction
                         self?.onWalkthroughInstruction?(instruction, turn)
                     }
+                    dispatch = RealtimeToolDispatch(result: result, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
+                } else if call.name == GoRoutinesTool.name, let request = call.routinesRequest {
+                    let heard = await turn.waitForHeard(
+                        until: (turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime) + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
+                    guard self?.isOpen == true, self?.turn === turn, turn.finishedUptime == nil else {
+                        turn.toolsInFlight -= 1; return
+                    }
+                    let result: [String: Any]
+                    if turn.goHandlesTurn { result = Self.handledLocally }
+                    else if request.needsOwnerWords,
+                            !(request.sourceQuote.flatMap { quote in heard.map { GoGoalRequest.matchesOwner(quote: quote, heard: $0) } } ?? false) {
+                        result = ["ok": false, "error": "routinesNeedOwnerWords"]
+                    } else if await self?.onRoutineRequest?(request, heard, turn) == true {
+                        result = Self.handledLocally
+                    } else { result = ["ok": false, "error": "invalidRoutineRequest"] }
                     dispatch = RealtimeToolDispatch(result: result, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
                 } else if call.name == GoGoalTool.name, let store = self?.goalStore, let request = call.goalRequest {
                     let heard: String?

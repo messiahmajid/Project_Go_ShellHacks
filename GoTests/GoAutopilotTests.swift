@@ -124,6 +124,25 @@ struct GoAutopilotTests {
         #expect(coordinator.state.phase == .done)
     }
 
+    @Test func takingOverAShownStepLooksAgainBeforeActing() async {
+        let app = App()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            plans += 1
+            return context.verifiedSteps.isEmpty
+                ? GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+                : GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        _ = await coordinator.start()                 // Go shows the step to the owner
+        #expect(plans == 1)
+        await coordinator.runForMe { step in           // "do it for me"
+            await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
+        }
+        #expect(plans == 3)                            // looked again, then planned after acting
+        #expect(app.actions.count == 1)
+        #expect(coordinator.state.phase == .done)
+    }
+
     @Test func aFailedStepIsRetriedOnceThenHandedBack() async {
         let app = App()
         var attempts = 0

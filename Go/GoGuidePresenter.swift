@@ -236,38 +236,85 @@ final class GoGuidePresenter {
     }
 
     /// A keyboard step finishes when the owner presses its keys in the step's
-    /// app, or, for typing only, once they have typed and paused (or pressed
-    /// Return). Which keys were typed is never recorded, only that typing happened.
+    /// app. A typing step finishes on what was typed, not on a pause: when the
+    /// focused field can be read, only once it holds the text (seen twice, or
+    /// on Return/Tab after it did); when it can't (a grid, a canvas), on
+    /// Return/Tab or a long pause, and then without praise, since Go couldn't
+    /// see the result. Which keys were typed is never recorded, only that typing
+    /// or a commit key happened; field contents are compared locally.
     private func watchKeyboard(_ step: GoWalkthroughStep, token: UUID) {
         let combo = step.keys.flatMap(GoKeyCombo.parse)
         var lastTyped: Date?
+        var committed = false
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let code = event.keyCode
             let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
             MainActor.assumeIsolated {
                 guard let self, token == self.generation, self.stillWaiting(step), GoActiveApp.isActive(step.app) else { return }
-                if let combo {
-                    if code == combo.keyCode, Self.flags(flags) == Self.significant(combo.flags) {
-                        self.generation = UUID(); self.targetClicked(step)
-                    }
+                let pressedCombo = combo.map { code == $0.keyCode && Self.flags(flags) == Self.significant($0.flags) } ?? false
+                // Keys alone: pressing them is the step.
+                if step.typeText == nil {
+                    if pressedCombo { self.generation = UUID(); self.targetClicked(step) }
                     return
                 }
-                if code == 36 || code == 76, lastTyped != nil { self.generation = UUID(); self.targetClicked(step); return }
+                // Text (then keys): the keys, or Return/Tab, only say "done" after typing.
+                if pressedCombo || Self.commitKeyCodes.contains(code) { if lastTyped != nil { committed = true }; return }
                 lastTyped = Date()
             }
         }
-        guard combo == nil else { return }
+        guard let text = step.typeText else { return }
+        let needsCommit = combo != nil
+        let app = step.app
         Task { [weak self] in
+            var matchedOnce = false
             while let self, token == self.generation, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(200))
+                try? await Task.sleep(for: .milliseconds(300))
                 guard token == self.generation, self.stillWaiting(step) else { return }
-                if let last = lastTyped, Date().timeIntervalSince(last) > 1.2 {
+                guard let typed = lastTyped else { continue }
+                let contents = await Task.detached { GoTextFields.focusedContents(app: app) }.value
+                guard token == self.generation, self.stillWaiting(step) else { return }
+                let verdict = Self.typingVerdict(contents: contents, text: text, matchedBefore: matchedOnce, committed: committed,
+                                                 needsCommit: needsCommit, quietSeconds: Date().timeIntervalSince(typed))
+                switch verdict {
+                case .finished(let confirmed):
+                    self.unconfirmedCompletion = confirmed ? nil : step
                     self.generation = UUID(); self.targetClicked(step); return
+                case .notYet(let matched):
+                    matchedOnce = matched
+                    // Return on text that doesn't match yet leaves the step open.
+                    if contents != nil { committed = false }
                 }
             }
         }
     }
+
+    /// Return, keypad Enter and Tab: the owner saying "that's it" in a field.
+    nonisolated static let commitKeyCodes: Set<UInt16> = [36, 76, 48]
+
+    enum TypingVerdict: Equatable {
+        case finished(confirmed: Bool)
+        case notYet(matched: Bool)
+    }
+
+    /// `contents` is nil when the focused field can't be read. `needsCommit`:
+    /// the step ends with a key (Return, Tab, a shortcut), which must be pressed.
+    nonisolated static func typingVerdict(contents: String?, text: String, matchedBefore: Bool, committed: Bool,
+                                          needsCommit: Bool, quietSeconds: TimeInterval) -> TypingVerdict {
+        guard let contents else {
+            // Can't see the field. A commit key after a matching read is still a
+            // confirmed finish (Return often closes the editor it was read from).
+            if committed { return .finished(confirmed: matchedBefore) }
+            return !needsCommit && quietSeconds > 4 ? .finished(confirmed: false) : .notYet(matched: false)
+        }
+        let matched = GoTextFields.matches(contents, typeText: text)
+        if matched && (committed || (!needsCommit && matchedBefore)) { return .finished(confirmed: true) }
+        return .notYet(matched: matched)
+    }
+
+    /// The step just finished on a guess (a typing step whose field couldn't be
+    /// read): no praise for it. Cleared by whoever reads it.
+    var unconfirmedCompletion: GoWalkthroughStep?
 
     nonisolated static func flags(_ flags: NSEvent.ModifierFlags) -> CGEventFlags {
         var result = CGEventFlags()

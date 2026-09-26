@@ -5,6 +5,9 @@ nonisolated struct GoPlanningContext: Codable, Sendable {
     let observation: GoObservation
     let verifiedSteps: [GoWalkthroughStep]
     let catalogLimited: Bool
+    /// Every step finished for this goal before `verifiedSteps`, oldest first, one
+    /// short line each, so a long task never loses what it already did.
+    var earlierSteps: [String] = []
     var screenshotJPEG: String? = nil
     /// The last few minutes, oldest first: earlier requests and what Go pointed
     /// at or did, so "open it" or "do the same there" can be resolved.

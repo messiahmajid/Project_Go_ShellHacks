@@ -284,3 +284,43 @@ struct GoRoutineReplayTests {
         #expect(coordinator.secondsSinceLastFinished != nil)
     }
 }
+
+/// Routine requests are recognised by meaning, and anything the local check
+/// misses reaches the same handling through the voice model's routines tool.
+struct GoRoutineWordingTests {
+    private let names = ["change brightness", "YouTube routine", "Create playlist"]
+    private func parse(_ heard: String) -> GoRoutineIntent? { GoRoutineIntent.parse(heard, names: names) }
+
+    @Test func anyQuestionAboutRoutinesListsThem() {
+        for heard in ["What routines do I have saved?", "What routine do I have saved?", "What are my saved routines?",
+                      "Do I have any routines?", "Tell me my routines", "Which workflows have I got?"] {
+            #expect(parse(heard) == .list, "\(heard)")
+        }
+    }
+
+    @Test func deletingAllIsItsOwnRequestNotAList() {
+        for heard in ["Can you delete all my saved routines?", "Delete all my Siri routines", "Remove every routine",
+                      "Clear my routines", "Delete my routines"] {
+            #expect(parse(heard) == .deleteAll, "\(heard)")
+        }
+        #expect(parse("Delete the change brightness routine") == .delete(name: "change brightness"))
+        #expect(parse("Delete the Siri routine") == .unknown(name: "siri"))
+        // Not about routines at all: left alone.
+        #expect(parse("Delete all the empty rows") == nil)
+        #expect(parse("What does this button do?") == nil)
+    }
+
+    @Test func theModelsRoutineRequestResolvesToTheSameIntent() {
+        func request(_ operation: String, _ name: String? = nil) -> GoRoutinesRequest {
+            GoRoutinesRequest(["operation": operation, "name": name as Any, "sourceQuote": "x"])
+        }
+        #expect(request("list").intent(names: names) == .list)
+        #expect(!request("list").needsOwnerWords)
+        #expect(request("deleteAll").intent(names: names) == .deleteAll)
+        #expect(request("delete", "the create playlist routine").intent(names: names) == .delete(name: "Create playlist"))
+        #expect(request("run", "youtube").intent(names: names) == .run(name: "YouTube routine"))
+        #expect(request("walk", "morning setup").intent(names: names) == .unknown(name: "morning setup"))
+        #expect(request("delete").intent(names: names) == nil)
+        #expect(request("run", "x").needsOwnerWords)
+    }
+}

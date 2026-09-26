@@ -67,6 +67,61 @@ struct GoScreenTargetTests {
         #expect(withMenuBar.systemControl(near: CGRect(x: 300, y: 400, width: 30, height: 30), label: "Control Center") == nil)
     }
 
+    @Test func aBoxOnADockItemItsLabelDoesNotNameIsOffTargetNotClicked() {
+        // The box sits on the Notes Dock item, but the plan describes a control inside the app.
+        let onNotes: [Double] = [945, 470, 995, 505]
+        var state = GoWalkthroughState()
+        state.accept(GoStepProposal(kind: .step, instruction: "Click Insert Chart.", targetID: "screen", expected: nil,
+                                    box: onNotes, label: "Insert Chart"), from: withMenuBar)
+        #expect(state.phase == .needsInput)
+        #expect(state.step == nil)
+        #expect(state.boxLandedOn?.id == "s3")
+        // The same box, labelled as that item, is the item.
+        var named = GoWalkthroughState()
+        named.accept(GoStepProposal(kind: .step, instruction: "Click Notes in the Dock.", targetID: "screen", expected: nil,
+                                    box: onNotes, label: "Notes icon"), from: withMenuBar)
+        #expect(named.phase == .waiting)
+        #expect(named.step?.outsideWindow == true)
+        #expect(named.boxLandedOn == nil)
+        // A label that names nothing in particular still takes the item under the box.
+        #expect(withMenuBar.systemControlMatch(near: withMenuBar.screenRect(forBox: onNotes)!, label: "the icon")
+                == .snap(withMenuBar.systemControls[3]))
+    }
+
+    @Test func aLongListKeepsTheAppsCommandsAheadOfItsContent() {
+        // A toolbar, then a grid of 1,000 cells, then tabs listed after the grid.
+        let toolbar = (0..<30).map { GoControl(id: "c\($0)", role: "AXButton", name: "Tool \($0)", radioSelection: nil) }
+        let cells = (30..<1030).map { GoControl(id: "c\($0)", role: "AXCell", name: "\($0)", radioSelection: nil) }
+        let tabs = (1030..<1033).map { GoControl(id: "c\($0)", role: "AXRadioButton", name: "Sheet \($0)", radioSelection: false) }
+        let kept = GoObservation.catalogControls(toolbar + cells + tabs)
+        #expect(kept.count == 200)
+        #expect(kept.filter { $0.role != "AXCell" }.count == 33)        // every command, tabs included
+        #expect(kept.contains { $0.name == "Sheet 1032" })
+        #expect(kept.filter { $0.role == "AXCell" }.first?.name == "30") // content from the start, in order
+        #expect(kept.map(\.id) == kept.sorted { Int($0.id.dropFirst())! < Int($1.id.dropFirst())! }.map(\.id))
+        // Mostly commands: content still gets its reserved share.
+        let manyCommands = (0..<400).map { GoControl(id: "c\($0)", role: "AXButton", name: "B\($0)", radioSelection: nil) } + cells
+        #expect(GoObservation.catalogControls(manyCommands).filter { $0.role == "AXCell" }.count == 50)
+        // Short lists are untouched.
+        #expect(GoObservation.catalogControls(toolbar) == toolbar)
+    }
+
+    @Test func aLongTaskShowsThePlannerEveryEarlierStep() {
+        let steps = (1...20).map { GoWalkthroughStep(instruction: "Step \($0).", app: "any.app", windowToken: "w",
+                                                      control: nil, menu: nil, expected: nil) }
+        let earlier = GoWalkthroughCoordinator.earlierSteps(steps, shownInFull: 8)
+        #expect(earlier == (1...12).map { "Step \($0)." })
+        #expect(GoWalkthroughCoordinator.earlierSteps(Array(steps.prefix(5)), shownInFull: 8).isEmpty)
+    }
+
+    @Test func aMenuBarIconMatchesByAWordOfItsName() {
+        var observation = self.observation
+        let battery = GoSystemControl(id: "b", kind: "menuBarIcon", name: "Battery, 80 percent",
+                                      frame: GoFrame(CGRect(x: 1100, y: 776, width: 26, height: 24)))
+        observation.systemControls = [battery]
+        #expect(observation.systemControlMatch(near: CGRect(x: 1102, y: 778, width: 20, height: 20), label: "battery icon") == .snap(battery))
+    }
+
     @Test func aBoxIsReplacedOnlyByAControlOfComparableSizeUnderItsCentre() {
         let box = CGRect(x: 1333, y: 865, width: 143, height: 24)
         #expect(GoScreenClick.plausibleRefinement(CGRect(x: 1330, y: 850, width: 146, height: 52), of: box))

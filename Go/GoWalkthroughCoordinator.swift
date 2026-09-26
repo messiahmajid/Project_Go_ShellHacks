@@ -198,6 +198,19 @@ final class GoWalkthroughCoordinator {
     }
 
     /// " in <App>" for memory lines, when the app is running.
+    /// The steps before the last `shownInFull`, one line each (the step as Go
+    /// described it), oldest first. Capped well inside the planner's context limit.
+    nonisolated static func earlierSteps(_ steps: [GoWalkthroughStep], shownInFull: Int) -> [String] {
+        Array(steps.dropLast(shownInFull).suffix(42)).map { String($0.instruction.prefix(240)) }
+    }
+
+    /// Whether `next` asks for the same text, in the same app, as the step just finished.
+    nonisolated static func repeatsTyping(done: GoWalkthroughStep, next: GoWalkthroughStep) -> Bool {
+        guard let typed = done.typeText, let again = next.typeText, done.app == next.app else { return false }
+        let squeeze = { (text: String) in text.lowercased().filter { !$0.isWhitespace } }
+        return squeeze(typed) == squeeze(again)
+    }
+
     nonisolated static func inApp(_ bundleIdentifier: String) -> String {
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first?.localizedName.map { " in " + $0 } ?? ""
     }
@@ -349,7 +362,12 @@ final class GoWalkthroughCoordinator {
 
     /// `allowPartial`: planning may use a read that hit the walk's size or time
     /// limits (very large interfaces); checking that a step happened never does.
+    /// How long the last planning read spent on the element walk and on the
+    /// rest (menus, fields, Dock and menu-bar icons), for the timing log.
+    private var lastReadSplit: (walkMs: Int, extrasMs: Int)?
+
     private func readObservation(menus: Bool, expectedApp: String? = nil, allowPartial: Bool = false) async throws -> GoObservation {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         var request: [String: Any] = ["verb": "snapshot"]
         if let expectedApp { request["expectApp"] = expectedApp }
         let line = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)
@@ -359,6 +377,7 @@ final class GoWalkthroughCoordinator {
               observation.complete || allowPartial else {
             throw GoVoiceFailure(kind: "walkthrough:unreadableInterface")
         }
+        let walkedAt = ProcessInfo.processInfo.systemUptime
         // Planning only: labels of typeable fields, never their contents. Read
         // alongside the menu bar rather than after it.
         let fieldsApp = observation.app
@@ -380,13 +399,17 @@ final class GoWalkthroughCoordinator {
         }
         if let fieldsTask { observation.fields = await fieldsTask.value }
         if let systemTask { observation.systemControls = await systemTask.value }
+        if menus {
+            let now = ProcessInfo.processInfo.systemUptime
+            lastReadSplit = (Int(((walkedAt - startedAt) * 1000).rounded()), Int(((now - walkedAt) * 1000).rounded()))
+        }
         return observation
     }
 
     private func planNext(generation token: UUID, prefix: String? = nil, attempt: Int = 0) async {
         watch.stop()
         guard token == generation, goalRevision == goals.state.revision, let goal = goals.activeGoal else { return }
-        guard state.verifiedSteps.count < 30 else { state.ask("Let's check the goal before continuing."); publish(); return }
+        guard state.verifiedSteps.count < 50 else { state.ask("Let's check the goal before continuing."); publish(); return }
         askSource = nil
         state.planning(); publish()
         do {
@@ -402,12 +425,13 @@ final class GoWalkthroughCoordinator {
             observation.screenFrame = shot?.frame
             guard token == generation, goalRevision == goals.state.revision else { return }
             let catalog = GoObservation(app: observation.app, windowToken: observation.windowToken, windowName: observation.windowName,
-                                        complete: observation.complete, controls: Array(observation.controls.prefix(160)),
+                                        complete: observation.complete, controls: GoObservation.catalogControls(observation.controls),
                                         menus: Array(observation.menus.prefix(180)), fields: observation.fields,
                                         screenFrame: observation.screenFrame, systemControls: observation.systemControls)
             var context = GoPlanningContext(goal: goal, observation: catalog,
                                             verifiedSteps: Array(state.verifiedSteps.suffix(8)),
-                                            catalogLimited: catalog.controls.count < observation.controls.count || catalog.menus.count < observation.menus.count)
+                                            catalogLimited: catalog.controls.count < observation.controls.count || catalog.menus.count < observation.menus.count,
+                                            earlierSteps: Self.earlierSteps(state.verifiedSteps, shownInFull: 8))
             // Screenshots cost about 3 s per plan, so they are sent when names aren't
             // enough: sparse accessibility, apps that needed one before, or on request.
             let sparse = catalog.controls.count < 20 || (catalog.menus.isEmpty && catalog.controls.count < 40)
@@ -466,7 +490,9 @@ final class GoWalkthroughCoordinator {
                 func ms(_ from: TimeInterval, _ to: TimeInterval) -> Int { Int(((to - from) * 1000).rounded()) }
                 MeasurementLogFile.appendJSONLine(["kind": "timing", "time": Date().timeIntervalSince1970,
                     "readMs": ms(startedAt, readAt), "captureWaitMs": ms(readAt, capturedAt), "planMs": ms(capturedAt, now),
-                    "vision": context.screenshotJPEG != nil, "controls": catalog.controls.count], toFileNamed: "go-walkthrough.log")
+                    "vision": context.screenshotJPEG != nil, "controls": catalog.controls.count,
+                    "observedControls": observation.controls.count, "walkMs": lastReadSplit?.walkMs ?? -1,
+                    "extrasMs": lastReadSplit?.extrasMs ?? -1], toFileNamed: "go-walkthrough.log")
             }
             guard token == generation, goalRevision == goals.state.revision, !Task.isCancelled else { return }
             // Launch steps name an app, and screen steps a box on the screenshot
@@ -491,6 +517,16 @@ final class GoWalkthroughCoordinator {
             observation = settled
             proposal = settledProposal
             state.accept(proposal, from: observation)
+            if let item = state.boxLandedOn {
+                // The box fell on a Dock or menu-bar item the plan didn't mean: say so
+                // to the planner and look again, rather than act on another app.
+                let place = item.kind == "dockItem" ? "the Dock item" : "the menu-bar icon"
+                remember("A screen box fell on \(place) \u{201C}\(item.name)\u{201D}, which was not the target; "
+                         + "box the target inside the app's own window.")
+                askSource = "boxOnSystemItem"
+                return await replan(token, prefix: prefix, attempt: attempt,
+                                    reason: "I couldn't pin down where that is. Can you point me to it?")
+            }
             state.stamp(observation.contextHash, windowFrame: observation.windowFrame)
             // A screenshot box is an estimate: use the exact frame of the control under it.
             if state.phase == .waiting, let rough = state.step?.screenRect?.rect, state.step?.outsideWindow == false,
@@ -499,6 +535,12 @@ final class GoWalkthroughCoordinator {
                 state.refineScreenRect(exact)
             }
             state.applyRisk(proposal.risk, warnOwner: !autopilot)
+            // The same text asked for again right after a typing step: it isn't done
+            // yet (a typo, or it wasn't confirmed). Say so rather than start afresh.
+            if !autopilot, state.phase == .waiting, let next = state.step, let done = state.verifiedSteps.last,
+               Self.repeatsTyping(done: done, next: next) {
+                state.prefixMessage("Not quite yet. ")
+            }
             if state.phase == .waiting, let step = state.step {
                 remember((step.final ? "Go pointed at " : "Go's next step: ") + step.targetDescription + Self.inApp(step.app))
             }
@@ -581,11 +623,16 @@ final class GoWalkthroughCoordinator {
             // A new or restarted task begins from the current screen.
             generation = UUID(); state = GoWalkthroughState(); goalRevision = goals.state.revision; goalID = goals.activeGoal?.id
         }
+        // Resuming after Go's own question ("want me to go ahead?") performs that
+        // step. Taking over a step Go was showing the owner looks again first: they
+        // may have done it, or half of it (text typed), and repeating it would
+        // click twice or type the text on top of theirs.
+        let resuming = pausedForQuestion
         autopilot = true
         pausedForQuestion = false
         watch.stop()
         suspended = false
-        if state.phase != .waiting { await planNext(generation: generation) }
+        if state.phase != .waiting || !resuming { await planNext(generation: generation) }
         var failures = 0
         var lastDone: (signature: String, context: Int)?
         while autopilot, !Task.isCancelled, state.phase == .waiting, let step = state.step {

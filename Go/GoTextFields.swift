@@ -70,6 +70,28 @@ nonisolated enum GoTextFields {
         return value(element, kAXValueAttribute)
     }
 
+    /// The contents of the app's focused text field, for a local check of a
+    /// typing step. Nil when focus isn't a readable, non-password text field
+    /// (a canvas, a grid, a custom editor): the caller can't know what was typed.
+    static func focusedContents(app bundleIdentifier: String) -> String? {
+        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else { return nil }
+        let application = AXUIElementCreateApplication(running.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.25)
+        guard let focused: AXUIElement = value(application, kAXFocusedUIElementAttribute), isTypeable(focused) else { return nil }
+        return value(focused, kAXValueAttribute)
+    }
+
+    /// What is left to type when the focused field already holds `contents`:
+    /// nothing when it is exactly the text, the rest when it holds only the
+    /// beginning of it (the owner started typing), else the whole text.
+    static func remainder(of text: String, after contents: String?) -> String {
+        guard let contents else { return text }
+        let held = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        if held == text.trimmingCharacters(in: .whitespacesAndNewlines) { return "" }
+        if !contents.isEmpty, text.hasPrefix(contents) { return String(text.dropFirst(contents.count)) }
+        return text
+    }
+
     /// Presses Return in the app's focused text field, after Go typed into it on
     /// a step the planner marked as needing Return. Only when that app is in front
     /// and its focused element is a typeable, non-password field.

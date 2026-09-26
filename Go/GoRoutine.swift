@@ -231,6 +231,11 @@ final class GoRoutineStore {
         return write(routines.filter { GoRoutine.key($0.name) != key })
     }
 
+    func deleteAll() -> Bool {
+        guard !loadFailed else { return false }
+        return write([])
+    }
+
     private func write(_ next: [GoRoutine]) -> Bool {
         do {
             let directory = url.deletingLastPathComponent()
@@ -256,6 +261,8 @@ nonisolated enum GoRoutineIntent: Equatable, Sendable {
     case run(name: String)
     case walk(name: String)
     case delete(name: String)
+    /// "Delete all my routines": Go asks for a yes first.
+    case deleteAll
     case list
     /// "Run the X routine" where no routine is called anything like X.
     case unknown(name: String)
@@ -267,6 +274,7 @@ nonisolated enum GoRoutineIntent: Equatable, Sendable {
         case .run: return "run"
         case .walk: return "walk"
         case .delete: return "delete"
+        case .deleteAll: return "deleteAll"
         case .list: return "list"
         case .unknown: return "unknown"
         }
@@ -302,8 +310,11 @@ nonisolated enum GoRoutineIntent: Equatable, Sendable {
             }
         }
         let padded = " " + text + " "
-        if ["what routines", "which routines", "list my routines", "list routines", "my routines", "show my routines",
-            "saved routines"].contains(where: { padded.contains(" " + $0 + " ") }) { return .list }
+        let spoken = Set(text.split(separator: " ").map(String.init))
+        // Requests are recognised by meaning (routines + what to do with them),
+        // not by exact wording, so a rephrasing or a misheard word still lands.
+        let aboutRoutines = !spoken.isDisjoint(with: ["routine", "routines", "workflow", "workflows"])
+        let asksToDelete = deleteLeads.contains { padded.contains(" " + $0 + " ") } || spoken.contains("clear")
         // The lead can come anywhere ("can you run X for me"); what follows it
         // must be a saved routine's name, so other requests never match.
         func named(after leads: [String]) -> String? {
@@ -319,6 +330,12 @@ nonisolated enum GoRoutineIntent: Equatable, Sendable {
             return nil
         }
         if let name = named(after: deleteLeads) { return .delete(name: name) }
+        if aboutRoutines, asksToDelete,
+           !spoken.isDisjoint(with: ["all", "every", "everything"]) || spoken.contains("routines") || spoken.contains("workflows") {
+            return .deleteAll
+        }
+        if ["what routines", "which routines", "list my routines", "list routines", "my routines", "show my routines",
+            "saved routines"].contains(where: { padded.contains(" " + $0 + " ") }) { return .list }
         // "Run it", "do that routine", "walk me through it": the routine just saved or used.
         if let recent, names.contains(recent) {
             let references: Set<String> = ["it", "that", "this", "the routine", "that routine", "this routine", "that one",
@@ -350,9 +367,15 @@ nonisolated enum GoRoutineIntent: Equatable, Sendable {
             return !key.isEmpty && padded.contains(" " + key + " routine ")
         }
         if spokenNames.count == 1 { return .run(name: spokenNames[0]) }
+        // A question about routines ("what routines do I have saved?", "do I have
+        // any routines?") lists them, however it is worded.
+        if aboutRoutines, !asksToDelete,
+           !spoken.isDisjoint(with: ["what", "which", "list", "show", "tell", "have", "got", "any", "saved", "names", "all"]) {
+            return .list
+        }
         // The owner clearly asked for a routine, just not one that exists.
         if padded.contains(" routine ") {
-            for lead in walkLeads + runLeads {
+            for lead in deleteLeads + walkLeads + runLeads {
                 guard let range = padded.range(of: " " + lead + " ") else { continue }
                 var asked = trimmingFiller(String(padded[range.upperBound...])).split(separator: " ").map(String.init)
                 while let first = asked.first, ["my", "the", "a", "an"].contains(first) { asked.removeFirst() }
