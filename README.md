@@ -1,165 +1,96 @@
-# Go
+# Go 👉
 
-Go is a macOS copilot that teaches by doing. Ask it how to do something and it
-walks you through it one step at a time on your real screen: a blue cursor flies
-to the next thing to click, highlights it, and a short bubble beside the cursor
-says what to do. When you click, Go checks what happened and gives the next
-step. If you click the wrong thing, it points you back. Or say "do it for me"
-and Go performs the steps itself, checking each one as it goes.
+A tiny helper that lives in your Mac's menu bar and shows you how to do stuff by actually pointing at it.
 
-Go lives in the menu bar. Hold **Control + Option**, speak, and release.
+We made this at ShellHacks.
+
+## Why this exists
+
+Every one of us has done the "tech support call" with a parent or grandparent. "Click the gear. No, the *gear*. Top right. Okay, what do you see now?" Twenty minutes later you've changed one setting and everyone's a little tired.
+
+And honestly, it's not much better for us. When we get stuck, we screenshot the screen, paste it into a chatbot, read a giant list of steps, flip back to the app, forget step 3, flip back to the chat... It works, but it's clunky, and for someone who isn't comfortable with computers, that whole loop is where they give up.
+
+So we asked: what if the help just showed up *on your screen*? You ask out loud, a little blue cursor flies over to the button you need, and it waits while you click it. Then it shows you the next one. Kind of like having a patient friend sitting next to you, except the friend doesn't sigh.
+
+We had older folks in mind the whole time, since a lot of people learn way better by being shown than by reading instructions. But it turns out it's handy for anyone who's ever gotten lost in a settings menu (so, everyone).
 
 ## What it does
 
-- **Guided walkthroughs.** One step at a time, planned from what is actually on
-  screen, never from a fixed script. Go waits as long as you need, notices
-  when you finish a step, and corrects wrong turns.
-- **Do it for me.** The same plan, carried out by Go: clicking, typing, pressing
-  keys and opening apps, verifying each step before the next.
-- **Pointing and answers.** "Where is…?" gets the cursor on the target, and a
-  quick question gets a short spoken answer.
-- **Keyboard work.** Go can type into whatever has focus (a spreadsheet cell,
-  an editor, a terminal) and press keys and shortcuts, so tasks like adding a
-  calculated column, filling it down and charting it can be done for you.
-  Shortcuts that quit, lock, log out or empty the Trash are never pressed;
-  ones that close or delete ask first.
-- **Routines.** After Go helps with something, say "Save this as" and a
-  name. Later, "Run <name>" does it for you and "Walk me through <name>"
-  guides you. Steps are saved by what they target (a button's name, a menu
-  path, a field label), not by screen position. Anything typed into
-  password-like fields is never saved.
-- **Trusted mode.** Optional. Go acts without confirmation cards, except for
-  anything that deletes, pays or touches passwords, which always asks first.
-- **Accessible output.** Everything Go says is also shown in full in the
-  bubble.
+Hold **Control + Option**, say what you want, let go.
 
-## How it works
+- **"How do I turn on Do Not Disturb?"** The blue cursor flies to the right spot, highlights it, and tells you one step at a time. It notices when you click and moves on. Click the wrong thing and it'll nudge you back. Everything it says also shows up as text, so you can follow along with the sound off.
+- **"Turn on Do Not Disturb."** Say it like a request instead of a question and Go just does it for you, checking that each step actually worked.
+- **"Save this as Night mode."** Once you've done something, Go can remember it. Later, "Run Night mode" does it again, or "Walk me through Night mode" shows you again.
 
-```
- push-to-talk ──▶ Gemini Live (speech in, tool calls)
-                      │
-                      ▼
-              GoWalkthroughCoordinator ──▶ /go-plan (Gemini planner, via worker)
-                      │                         ▲
-     accessibility tree + screenshot ───────────┘
-                      │
-                      ▼
-      HarnessServer ─▶ ActionSafetyKernel ─▶ act ─▶ ActionVerifier
-                      │
-                      ▼
-      blue cursor + highlight + bubble        ElevenLabs speech (via worker)
-```
+That's pretty much it. No big app window, no chat box. It hangs out in the menu bar until you need it.
 
-1. **Sensing.** Go reads the accessibility tree that macOS apps publish for
-   VoiceOver: named, positioned controls. When a control has no name (an
-   icon-only button, a web canvas), the planner can ask for a screenshot and
-   ground the target visually.
-2. **Planning.** The Cloudflare worker's `/go-plan` route asks Gemini for the
-   single next step, as structured JSON: a step, a question, an answer, a point,
-   or "done".
-3. **Acting safely.** Every action goes through a local harness. A deterministic
-   safety kernel allows it, asks you on a confirmation card, or refuses it
-   outright (for example emptying the Bin or anything involving a password
-   field). An action only counts as done when a second read of the app shows
-   that it happened.
-4. **Speaking.** Gemini Live handles the conversation and tool calls, and
-   ElevenLabs speaks each reply. API keys stay in the worker; the app never
-   ships with them.
+## "Wait, it clicks things for me? Is that safe?"
 
-## Requirements
+Fair question, we asked ourselves the same thing. A few rules we built in:
 
-- macOS 14.2 or later, with Xcode
-- Node.js, to run the worker
-- A Gemini API key and an ElevenLabs API key
+- It never types into password fields, and it never saves anything that looks like a password or code.
+- It asks you first before anything that deletes, closes or sends stuff.
+- Some things it just won't do, like emptying your Trash or buying things. That's on you.
+- It only counts a step as done once it can see the app really changed. No pretending.
 
-## Setup
+## How it works (the short version)
 
-1. **Signing.** Create `Signing.local.xcconfig` next to `Signing.xcconfig`
-   with your own bundle identifier (this file is git-ignored):
+Go reads your screen the same way screen readers do (macOS accessibility), so it knows most buttons by name. When something doesn't have a name, like an icon-only button, it looks at a screenshot instead.
 
+Google's Gemini figures out **one next step at a time** based on what's actually on your screen right now. There are no pre-written scripts for specific apps, so it works (mostly) wherever you are. Gemini Live handles listening, and ElevenLabs gives Go its voice. The API keys sit in a small Cloudflare worker so they never end up inside the app.
+
+## Running it yourself
+
+You'll need a Mac (macOS 14.2+), Xcode, Node.js, and API keys for Gemini and ElevenLabs.
+
+1. **Set a bundle id.** Make a file called `Signing.local.xcconfig` next to `Signing.xcconfig` with:
    ```
    GO_BUNDLE_ID = com.yourname.go
    ```
+   Then open `Go.xcodeproj` and pick your team under Signing & Capabilities.
 
-   Then open `Go.xcodeproj` and choose your team under Signing & Capabilities.
-
-2. **Keys.** Create `worker/.dev.vars` (git-ignored):
-
-   ```dotenv
+2. **Add your keys.** Make `worker/.dev.vars`:
+   ```
    GEMINI_API_KEY=
    ELEVENLABS_API_KEY=
    ```
+   Then run `python3 scripts/go-configure-local.py` so the app knows where your worker is.
 
-   Then point the app at the local worker. This also generates the shared
-   client key:
-
-   ```bash
-   python3 scripts/go-configure-local.py
-   ```
-
-3. **Worker.** Start it and leave it running:
-
+3. **Start the worker** and leave it running:
    ```bash
    cd worker && npm ci && npm run dev -- --local --ip 127.0.0.1 --port 8787
    ```
 
-4. **Run.** Build and run the `Go` scheme from Xcode (Cmd+R). Grant
-   **Accessibility**, **Screen Recording** and **Microphone** when asked.
+4. **Run Go** from Xcode with ⌘R. macOS will ask for Accessibility, Screen Recording and Microphone permission. Say yes to all three.
 
-[`GO_SETUP.md`](GO_SETUP.md) has provider checks and step-by-step manual tests.
+Now hold Control + Option and ask it something. If things act weird, [`GO_SETUP.md`](GO_SETUP.md) has some checks.
 
-## Project layout
+## Stuff that's still rough
 
-| Path | What it is |
-|---|---|
-| `Go/GoApp.swift`, `GoController.swift` | App entry point and app-wide state (permissions, onboarding, shortcut, overlay) |
-| `Go/GoPanelView.swift`, `MenuBarPanelManager.swift` | The menu bar panel |
-| `Go/OverlayWindow.swift`, `GoNotch.swift`, `GoGuidePresenter.swift` | The blue cursor, highlight, bubbles and notch status |
-| `Go/GoWalkthrough*.swift`, `GoStepPlanner.swift`, `GoStepExecutor.swift` | Walkthroughs: planning the next step, detecting completion, doing it for you |
-| `Go/GoScreenClick.swift`, `GoKeystrokes.swift`, `GoTextFields.swift`, `GoMenuPointer.swift` | Clicking, typing and menu pointing for controls the accessibility API cannot press |
-| `Go/GoTrustedMode.swift`, `GoVoiceActionPolicy.swift`, `GoGuidanceIntent.swift` | What Go may do without asking, and what the owner's words authorise |
-| `Go/GoGoalStore.swift`, `GoGoalTool.swift` | The remembered goal ("remember my goal…") |
-| `Go/GoRoutine.swift` | Saved routines: what a step records, the store, the voice phrases, and finding a saved step on the current screen |
-| `Go/Realtime*.swift`, `GoVoiceTransport.swift`, `ElevenLabsTTSClient.swift`, `GoSpeechBuffer.swift` | Voice: the Gemini Live session, its tools, and spoken replies |
-| `Go/PushToTalkShortcut.swift`, `GlobalPushToTalkShortcutMonitor.swift` | The push-to-talk key |
-| `Go/Accessibility*.swift`, `ElementActionIntent.swift` | Reading apps through the accessibility API |
-| `Go/HarnessServer.swift`, `ActionSafetyKernel.swift`, `ActionVerifier.swift`, `EscalationLadder.swift` | The harness every action goes through: policy, execution and verification |
-| `Go/HarnessConfirmations.swift`, `Confirmation*.swift`, `ApprovalRulesKeychainStore.swift`, `HarnessAppPolicy.swift` | Confirmation cards and "Always allow" rules (kept in the Keychain) |
-| `worker/` | Cloudflare worker: `/go-plan`, `/gemini-live-token`, `/tts` |
-| `GoTests/` | Unit tests (Swift Testing) |
-| `scripts/` | Local setup, smoke checks and live harness tests |
+It's a hackathon project, so here's what we know about:
 
-## Tests
+- English only for now.
+- Simple things (settings, menus, opening apps) work well. Big multi-step jobs, like "analyze this spreadsheet and make a chart," work sometimes. Other times Go gets stuck and asks you for help.
+- If there's a row of identical-looking unlabeled icons, it can occasionally point at the neighbour.
+- We've only tested it on our own laptops, with one screen.
 
-```bash
-scripts/run-tests.sh                        # unit tests, driven through Xcode
-node --test worker/tests/go-plan.test.mjs   # worker planner tests
-python3 scripts/go-voice-smoke.py           # worker + providers (uses a little API credit)
-python3 scripts/planner-tests.py            # live harness tasks; run Go with --harness
-```
+## If we kept going
 
-`run-tests.sh` drives Xcode's own test action because building with
-`xcodebuild` into Xcode's DerivedData can invalidate the app's permission grants.
+- More languages, and a slower, calmer voice option.
+- Sharing routines with family. Imagine setting up "Video call the grandkids" once and just handing it over.
+- A "what did I just do?" button that gives you a simple recap.
 
-## Launch flags
+## Poking around the code
 
-| Flag | Effect |
-|---|---|
-| `--harness` | Opens the harness socket at `~/Library/Application Support/Go/harness.sock` for scripted testing |
-| `--harness-dry-run` | Every harness request is a dry run |
+The app is Swift/SwiftUI in `Go/`, tests live in `GoTests/`, and the Cloudflare worker is in `worker/`. Good places to start:
 
-Logs are written to `~/Library/Logs/Go`.
+- `GoWalkthroughCoordinator.swift` plans and follows the steps
+- `GoGuidePresenter.swift` draws the blue cursor, highlight and speech bubble
+- `ActionSafetyKernel.swift` decides what Go can do, what it asks about, and what it refuses
+- `GoRoutine.swift` saves and replays routines
 
-## Known limitations
+Tests: `scripts/run-tests.sh`.
 
-- Go can only point at what it can find. Controls with neither an accessibility
-  name nor a clear visual label may not be located.
-- Verification confirms that the app reacted, not that the result was what you
-  intended. Nothing undoes a click.
-- Only the frontmost app is guided. Nothing has been tested on a second display.
+## Credits
 
-## License
-
-MIT, see [`LICENSE`](LICENSE). Go began as a fork of an MIT-licensed project;
-the original copyright notice is kept in `LICENSE` as that license requires.
-
+Go started from an open-source, MIT-licensed on-screen assistant, and we're grateful it existed. The original copyright notice lives in [`LICENSE`](LICENSE).
