@@ -70,6 +70,8 @@ nonisolated enum GoStepExecutor {
         // The planner's judgement of the step's real effect sits on top of the
         // fixed checks below. It can only stop Go, never let through what they block.
         if let refusal = riskRefusal(step.risk) { return .blocked(refusal) }
+        // The owner's own details: Go never guesses them.
+        if step.fill { return .blocked("that's yours to fill in") }
         if step.reveal {
             guard let direction = step.scrollDirection else { return .retryable("I can't reveal that part myself") }
             let app = step.app

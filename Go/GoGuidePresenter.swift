@@ -232,7 +232,7 @@ final class GoGuidePresenter {
     /// Clicking the pointed target finishes the step, except a menu title (opens
     /// the menu) or a field (typing finishes it).
     nonisolated static func completesOnClick(_ step: GoWalkthroughStep) -> Bool {
-        !step.reveal && step.typeText == nil && !step.opens && step.launchApp == nil && (step.menu.map { $0.path.count == 1 } ?? true)
+        !step.reveal && !step.fill && step.typeText == nil && !step.opens && step.launchApp == nil && (step.menu.map { $0.path.count == 1 } ?? true)
     }
 
     /// A keyboard step finishes when the owner presses its keys in the step's
@@ -287,6 +287,51 @@ final class GoGuidePresenter {
                 }
             }
         }
+    }
+
+    /// A form field the owner fills with their own details. Done once they have
+    /// typed, the field isn't empty, and they move on (Tab, Return, or focus
+    /// leaving the field). Only emptiness is checked, locally; the value is never
+    /// read into Go's state, logged or sent. A field that can't be read (a
+    /// password box) counts on moving on after typing, without praise.
+    private func followFill(in rect: CGRect, step: GoWalkthroughStep, token: UUID) {
+        var typed = false
+        var committed = false
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            let code = event.keyCode
+            MainActor.assumeIsolated {
+                guard GoActiveApp.isActive(step.app) else { return }
+                if Self.commitKeyCodes.contains(code) { if typed { committed = true } } else { typed = true }
+            }
+        }
+        let app = step.app
+        Task { [weak self] in
+            while let self, token == self.generation, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard token == self.generation, self.stillWaiting(step), typed else { continue }
+                let (filled, stillHere) = await Task.detached { () -> (Bool?, Bool) in
+                    let contents = GoTextFields.contents(at: rect)
+                    let focus = GoTextFields.focusFrame(app: app)
+                    return (contents.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+                            focus.map { $0.intersects(rect) } ?? false)
+                }.value
+                guard token == self.generation, self.stillWaiting(step) else { return }
+                if Self.fillFinished(filled: filled, movedOn: committed || !stillHere) {
+                    self.unconfirmedCompletion = filled == nil ? step : nil
+                    self.removeClickMonitor()
+                    self.generation = UUID()
+                    self.targetClicked(step)
+                    return
+                }
+            }
+        }
+    }
+
+    /// `filled` is nil when the field can't be read (a password box).
+    nonisolated static func fillFinished(filled: Bool?, movedOn: Bool) -> Bool {
+        guard movedOn else { return false }
+        return filled ?? true
     }
 
     /// Return, keypad Enter and Tab: the owner saying "that's it" in a field.
@@ -433,11 +478,13 @@ final class GoGuidePresenter {
                 self.point(rect, state.message)
                 // Clicking into a field only focuses it; the typed text finishes that step.
                 // Keyboard steps point at where typing lands; a click elsewhere isn't a wrong turn.
-                if let rect, !step.keyboard { self.watchClicks(around: rect, state: state, isFinal: Self.completesOnClick(step)) }
+                // Moving to the next form field by clicking it isn't a wrong turn either.
+                if let rect, !step.keyboard, !step.fill { self.watchClicks(around: rect, state: state, isFinal: Self.completesOnClick(step)) }
                 if let rect, step.menu == nil, step.launchApp == nil { self.trackTarget(step, from: rect, token: token) }
                 if let rect, let text = step.typeText {
                     self.followTyping(text, in: rect, step: step, needsReturn: step.pressReturn, token: token)
                 }
+                if let rect, step.fill { self.followFill(in: rect, step: step, token: token) }
                 if let menu = step.menu { await self.followMenu(menu.path, step: step, state: state, from: rect, token: token) }
             }
             await self.speechTask?.value

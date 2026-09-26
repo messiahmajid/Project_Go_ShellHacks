@@ -33,14 +33,14 @@ final class RealtimeVoiceSession {
             if state.phase == .planning { GoNotch.shared.handle(.planningStarted) }
             else if !spokenNext { GoNotch.shared.handle(.planningFinished) }
             if state.verifiedSteps.count < self.tickedSteps { self.tickedSteps = state.verifiedSteps.count }
+            // A soft tick the moment Go registers the owner's step, so the wait for
+            // the next one isn't silent. (Scrolling to look isn't a finished step.)
+            if state.verifiedSteps.count > self.tickedSteps, !self.walkthrough.autopilot,
+               state.verifiedSteps.last?.reveal != true {
+                self.playTick(.release)
+            }
+            self.tickedSteps = state.verifiedSteps.count
             if state.phase == .planning {
-                // A soft tick the moment Go registers the owner's step, so the wait for
-                // the next one isn't silent. (Scrolling to look isn't a finished step.)
-                if state.verifiedSteps.count > self.tickedSteps, !self.walkthrough.autopilot,
-                   state.verifiedSteps.last?.reveal != true {
-                    self.playTick(.release)
-                }
-                self.tickedSteps = state.verifiedSteps.count
                 // No praise yet: the next plan checks the finished step against the
                 // screen and says "nice" (or "not quite yet") with the next step.
                 // A typing step finished without reading its field is reported, so
@@ -607,6 +607,27 @@ final class RealtimeVoiceSession {
             marks.goHandlesTurn = true
             marks.walkthroughReply = text
             if walkthrough.state.phase != .waiting { onGuideText?(text) }
+            onStateChange?(.idle)
+            queueSpeech(text, for: turn)
+            return true
+        }
+        // A question about what the step means ("what's a routing number?", "do I need
+        // this?"): a real answer from the planner, then the same step again.
+        if liveTurn === turn, let heard, walkthrough.state.phase == .waiting, let step = walkthrough.state.step,
+           GoGuidanceIntent.asksAboutMeaning(heard, aboutField: step.field != nil || step.fill) {
+            marks.goHandlesTurn = true
+            turn.line.localIntent = "stepAnswer"
+            cancelQueuedSpeech(); turn.speechTasks.removeAll(); turn.speechBuffer = GoSpeechBuffer()
+            let cue = phrases.say(.thinking)
+            onGuideText?(cue)
+            let acknowledgement = acknowledgeIfSlow(turn, saying: cue)
+            let answer = await walkthrough.answerAboutCurrentStep(heard)
+            acknowledgement.cancel()
+            guard liveTurn === turn else { return true }
+            let text = answer ?? walkthrough.currentStepExplanation()
+            marks.walkthroughReply = text
+            guide.present(walkthrough.state, spoken: false)
+            onGuideText?(text)
             onStateChange?(.idle)
             queueSpeech(text, for: turn)
             return true

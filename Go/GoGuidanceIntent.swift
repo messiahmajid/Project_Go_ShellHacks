@@ -119,6 +119,28 @@ nonisolated enum GoGuidanceIntent: Equatable, Sendable {
         return false
     }
 
+    /// A question about what the current step means, which needs a real answer
+    /// rather than the step repeated: "what's a routing number?", "do I need this
+    /// one?", "what format?", "what should I put here?". For a form field any
+    /// "what is …" counts; otherwise it must point at the step ("this", "it"…).
+    static func asksAboutMeaning(_ heard: String?, aboutField: Bool) -> Bool {
+        guard let heard else { return false }
+        let text = RealtimeOpenAppTool.normalisedAnswer(heard)
+        let words = text.split(separator: " ").map(String.init)
+        guard words.count >= 2, words.count <= 14 else { return false }
+        let padded = " " + text + " "
+        let always = ["do i need", "do i have to", "is this required", "is it required", "is that required", "is this optional",
+                      "is it optional", "what format", "which format", "what should i put", "what do i put", "what goes",
+                      "can i skip", "should i fill", "why do they need", "why does it need", "what if i don t have",
+                      "what if i dont have", "where do i find", "where can i find"]
+        if always.contains(where: { padded.contains(" " + $0 + " ") }) { return true }
+        let asksWhat = ["what is", "what s", "whats", "what does", "what are", "what do they mean", "what does that mean"]
+            .contains(where: { padded.hasPrefix(" " + $0 + " ") })
+        guard asksWhat else { return false }
+        let pointsAtStep = !Set(words).isDisjoint(with: ["this", "that", "it", "here", "field", "box", "option", "one", "button"])
+        return aboutField || pointsAtStep
+    }
+
     /// A direct command ("open the photo called FT", "click Share") is a task Go
     /// performs itself through its planner, whatever app it concerns.
     private static func command(_ heard: String) -> GoGuidanceIntent? {

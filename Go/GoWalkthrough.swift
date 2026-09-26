@@ -227,6 +227,18 @@ nonisolated struct GoStepProposal: Codable, Equatable, Sendable {
     var checklist: [String]? = nil
     /// Where the plan's time went (token counts and provider time), for the log.
     var usage: GoPlanUsage? = nil
+    /// A field the owner fills with their own details (Go doesn't know the value).
+    var fill: Bool? = nil
+    /// On the first plan for a form page: every field to fill, in page order,
+    /// each with what goes there. Go then moves field to field by itself.
+    var formFields: [GoFormField]? = nil
+}
+
+/// One field of a form, as the planner describes it: its ID on this screen and
+/// the instruction for it ("Your date of birth, month first.").
+nonisolated struct GoFormField: Codable, Equatable, Sendable {
+    let id: String
+    let instruction: String
 }
 
 nonisolated struct GoPlanUsage: Codable, Equatable, Sendable {
@@ -284,6 +296,9 @@ nonisolated struct GoWalkthroughStep: Codable, Equatable, Sendable {
     var reveal = false
     var scrollDirection: String? = nil
     var risk: GoRisk? = nil
+    /// A form field the owner fills with their own details: done when it has
+    /// something in it and they move on. Go never reads or needs the value.
+    var fill = false
 
     /// A short description of the step for Go's own short-term memory, with
     /// what was typed (unless the field looks like it holds a secret), so
@@ -310,7 +325,7 @@ nonisolated struct GoWalkthroughStep: Codable, Equatable, Sendable {
 
     /// For logs: what kind of target the step has, never its name.
     var kindLabel: String {
-        keyboard ? "keyboard" : reveal ? "reveal" : screenRect != nil ? "screen" : launchApp != nil ? "launch" : menu != nil ? "menu" : field != nil ? "field" : opens ? "open" : "control"
+        keyboard ? "keyboard" : reveal ? "reveal" : screenRect != nil ? "screen" : launchApp != nil ? "launch" : menu != nil ? "menu" : fill ? "fill" : field != nil ? "field" : opens ? "open" : "control"
     }
 
     /// Identifies what the step acts on, so an action that changed nothing is noticed.
@@ -486,6 +501,16 @@ nonisolated struct GoWalkthroughState: Sendable {
             if proposal.kind == .point {
                 step = GoWalkthroughStep(instruction: proposal.instruction, app: observation.app, windowToken: observation.windowToken,
                                          control: nil, menu: nil, expected: nil, field: field, typeText: nil, final: true)
+                message = proposal.instruction; phase = .waiting
+                firstMatchAt = nil; offTrackAt = nil
+                return
+            }
+            // A field the owner fills with their own details: the instruction says what goes there.
+            if proposal.fill == true {
+                var fillStep = GoWalkthroughStep(instruction: proposal.instruction, app: observation.app, windowToken: observation.windowToken,
+                                                 control: nil, menu: nil, expected: nil, field: field)
+                fillStep.fill = true
+                step = fillStep
                 message = proposal.instruction; phase = .waiting
                 firstMatchAt = nil; offTrackAt = nil
                 return

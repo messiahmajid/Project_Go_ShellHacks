@@ -15,6 +15,10 @@ nonisolated struct GoPlanningContext: Codable, Sendable {
     /// The planner's private checklist for this goal (parts and facts to find),
     /// sent back each time so it can tick lines off. Never spoken or shown.
     var checklist: [String] = []
+    /// The owner's question about the step being shown, and that step, when Go
+    /// asks the planner to answer it rather than plan.
+    var ownerQuestion: String? = nil
+    var currentStep: String? = nil
     var screenshotJPEG: String? = nil
     /// The last few minutes, oldest first: earlier requests and what Go pointed
     /// at or did, so "open it" or "do the same there" can be resolved.

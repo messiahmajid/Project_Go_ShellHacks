@@ -122,6 +122,10 @@ final class GoWalkthroughCoordinator {
     private(set) var lastVerdict: String?
     /// A cheap fingerprint of the app in front, to see an action land (`GoScreenPulse`).
     private let pulse: @Sendable () -> Int
+    /// The app's typeable fields by label, and whether one already holds text
+    /// (checked locally; the text itself is never kept).
+    private let fields: @Sendable (String) -> [GoTextField]
+    private let fieldHasText: @Sendable (CGRect) -> Bool
     /// The planner's working notes for the current goal (what it saw on screens
     /// that are no longer in view). Memory only; cleared with the goal.
     private(set) var notes: [String] = []
@@ -134,6 +138,10 @@ final class GoWalkthroughCoordinator {
     /// The next plan gets the screenshot whatever else holds (set after a plan
     /// named a control that wasn't there).
     private var screenshotNextPlan = false
+    /// A form being filled in: the fields still to do, in page order, each with
+    /// its instruction. Go moves through them without a new plan per field.
+    private var formQueue: [(field: GoTextField, instruction: String)] = []
+    private var formApp: String?
     /// The planner's private checklist for the current goal; cleared with it.
     private(set) var checklist: [String] = []
     /// Short-term memory for resolving "it", "that", "there": (uptime, line).
@@ -286,9 +294,14 @@ final class GoWalkthroughCoordinator {
          frontmostApp: @escaping @MainActor () -> String? = { GoActiveApp.bundleIdentifier },
          now: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          pulse: @escaping @Sendable () -> Int = { GoScreenPulse.current() },
+         fields: @escaping @Sendable (String) -> [GoTextField] = { GoTextFields.list(app: $0, limit: 40) },
+         fieldHasText: @escaping @Sendable (CGRect) -> Bool = { rect in
+             GoTextFields.contents(at: rect).map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+         },
          logTransitions: Bool = true) {
         self.goals = goals; self.answer = answer; self.planner = planner; self.capture = capture
         self.frontmostApp = frontmostApp; self.now = now; self.pulse = pulse
+        self.fields = fields; self.fieldHasText = fieldHasText
         self.logTransitions = logTransitions
         let own = Bundle.main.bundleIdentifier
         lastOwnerApp = NSWorkspace.shared.frontmostApplication.flatMap { $0.bundleIdentifier == own ? nil : $0 }
@@ -354,7 +367,7 @@ final class GoWalkthroughCoordinator {
     func start() async -> [String: Any] {
         stop()
         guard goals.activeGoal != nil else { return ["ok": false, "message": "Tell me your goal first."] }
-        state = GoWalkthroughState(); notes = []; checklist = []
+        state = GoWalkthroughState(); notes = []; checklist = []; formQueue = []
         goalRevision = goals.state.revision
         goalID = goals.activeGoal?.id
         pendingCheck = nil
@@ -460,7 +473,7 @@ final class GoWalkthroughCoordinator {
         // Planning only: labels of typeable fields, never their contents. Read
         // alongside the menu bar rather than after it.
         let fieldsApp = observation.app
-        let fieldsTask: Task<[GoTextField], Never>? = menus ? Task.detached { GoTextFields.list(app: fieldsApp) } : nil
+        let fieldsTask: Task<[GoTextField], Never>? = menus ? Task.detached { [fields] in fields(fieldsApp) } : nil
         let systemTask: Task<[GoSystemControl], Never>? = menus ? Task.detached { GoSystemControls.current() } : nil
         if menus {
             let menuLine = String(decoding: try JSONSerialization.data(withJSONObject: ["verb": "menus", "expectApp": observation.app]), as: UTF8.self)
@@ -649,6 +662,12 @@ final class GoWalkthroughCoordinator {
             // The last step, checked against this screen before any praise.
             lastVerdict = proposal.lastStep
             notes = Self.addingNote(proposal.note, to: notes)
+            if let form = proposal.formFields, !form.isEmpty {
+                formQueue = form.compactMap { entry in
+                    observation.fields.first { $0.id == entry.id }.map { ($0, String(entry.instruction.prefix(240))) }
+                }
+                formApp = observation.app
+            }
             if let revised = proposal.checklist { checklist = Self.cleanedChecklist(revised) }
             if let check = pendingCheck, check.step == state.verifiedSteps.last {
                 pendingCheck = nil
@@ -744,7 +763,7 @@ final class GoWalkthroughCoordinator {
         guard goals.activeGoal != nil else { return }
         if goalRevision != goals.state.revision || state.phase == .stopped || state.phase == .idle {
             // A new or restarted task begins from the current screen.
-            generation = UUID(); state = GoWalkthroughState(); notes = []; checklist = []; goalRevision = goals.state.revision; goalID = goals.activeGoal?.id
+            generation = UUID(); state = GoWalkthroughState(); notes = []; checklist = []; formQueue = []; goalRevision = goals.state.revision; goalID = goals.activeGoal?.id
         }
         // Resuming after Go's own question ("want me to go ahead?") performs that
         // step. Taking over a step Go was showing the owner looks again first: they
@@ -772,6 +791,16 @@ final class GoWalkthroughCoordinator {
                 state.askBeforeStep("Before I do that: it \(what.lowercased()). Want me to go ahead?")
                 publish()
                 break
+            }
+            // The owner's own details go in their own hands: hand the field over
+            // without calling it a failure, and carry on once they've filled it.
+            if step.fill {
+                autopilot = false
+                handedBack = step
+                state.restore(step, message: step.instruction)
+                publish()
+                armWatch()
+                return
             }
             // A pointer-only step ("here's the slider") is where the owner sets
             // something Go can't know, like a level: show it and hand it over.
@@ -871,6 +900,14 @@ final class GoWalkthroughCoordinator {
         }
         guard state.completeByClick(step) else { return }
         noteOwnerFinished(step)
+        // A form field done: the next one straight away, without a new plan.
+        if step.fill, let next = await nextFormField(after: step), token == generation, state.phase == .planning {
+            state.restore(next, message: next.instruction)
+            lastStep = next
+            publish()
+            armWatch()
+            return
+        }
         pendingCheck = (step, reacted, step.typeText != nil, true)
         publish()
         if state.phase == .planning { await planNext(generation: token) }
@@ -884,6 +921,57 @@ final class GoWalkthroughCoordinator {
             ? (step.typeText != nil ? "Type it where I'm pointing, in what's selected now." : "Press it here, in this window.")
             : "Right where I'm pointing."
         return place + " " + step.instruction
+    }
+
+    /// After a form field is filled, the next field of the planned list that is
+    /// still on screen (found by its label) and still empty. Nil when none is
+    /// left or the page changed; then the planner looks again.
+    private func nextFormField(after done: GoWalkthroughStep) async -> GoWalkthroughStep? {
+        guard done.fill, done.app == formApp, !formQueue.isEmpty, let finished = done.field else { return nil }
+        if let index = formQueue.firstIndex(where: { $0.field.label == finished.label && $0.field.role == finished.role }) {
+            formQueue.removeFirst(index + 1)
+        }
+        let app = done.app
+        let onScreen = await Task.detached { [fields] in fields(app) }.value
+        while let entry = formQueue.first {
+            formQueue.removeFirst()
+            guard !entry.field.label.isEmpty,
+                  let field = onScreen.first(where: { $0.label == entry.field.label && $0.role == entry.field.role }) else { continue }
+            // Filled already (autofill, or done out of order): nothing to do there.
+            let frame = field.frame
+            let filled = await Task.detached { [fieldHasText] in fieldHasText(frame) }.value
+            if filled { continue }
+            var step = GoWalkthroughStep(instruction: entry.instruction, app: app, windowToken: done.windowToken,
+                                         control: nil, menu: nil, expected: nil, field: field)
+            step.fill = true
+            step.windowName = done.windowName
+            return step
+        }
+        return nil
+    }
+
+    /// An answer to the owner's question about the step being shown ("what's a
+    /// routing number?", "do I need this one?"), from the planner with the step
+    /// and the screen. The step itself stays. While a form is being filled in, no
+    /// screenshot is taken, so the owner's details stay on the Mac.
+    func answerAboutCurrentStep(_ question: String) async -> String? {
+        guard state.phase == .waiting, let step = state.step, let goal = goals.activeGoal else { return nil }
+        let token = generation
+        guard let observation = try? await readObservation(menus: false, expectedApp: step.app, allowPartial: true) else { return nil }
+        var catalog = GoObservation(app: observation.app, windowToken: observation.windowToken, windowName: observation.windowName,
+                                    complete: observation.complete, controls: GoObservation.catalogControls(observation.controls))
+        let app = observation.app
+        catalog.fields = await Task.detached { [fields] in fields(app) }.value
+        var context = GoPlanningContext(goal: goal, observation: catalog, verifiedSteps: Array(state.verifiedSteps.suffix(8)),
+                                        catalogLimited: catalog.controls.count < observation.controls.count,
+                                        earlierSteps: Self.earlierSteps(state.verifiedSteps, shownInFull: 8), notes: notes, checklist: checklist)
+        context.recent = recent.map(\.line)
+        context.ownerQuestion = String(question.prefix(300))
+        context.currentStep = String((step.instruction + " (" + step.targetDescription + ")").prefix(300))
+        if !step.fill, formQueue.isEmpty, let shot = await capture() { context.screenshotJPEG = shot.jpeg }
+        guard let proposal = try? await planner(context), token == generation, state.step == step,
+              proposal.kind == .answer || proposal.kind == .ask else { return nil }
+        return proposal.instruction
     }
 
     /// The owner did the step Go handed them: carry on by itself after the next plan.
