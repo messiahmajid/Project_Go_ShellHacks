@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 @testable import Go
@@ -27,7 +28,8 @@ struct GoTypingCompletionTests {
     @Test func anUnreadableFieldFinishesOnACommitOrALongPauseWithoutPraise() {
         #expect(verdict(nil, quiet: 2) == .notYet(matched: false))
         #expect(verdict(nil, committed: true) == .finished(confirmed: false))
-        #expect(verdict(nil, quiet: 5) == .finished(confirmed: false))
+        #expect(verdict(nil, quiet: 5) == .notYet(matched: false))              // a pause to look something up
+        #expect(verdict(nil, quiet: 11) == .finished(confirmed: false))
         #expect(verdict(nil, needsCommit: true, quiet: 9) == .notYet(matched: false))
         // Return closed the editor right after a matching read: that was seen.
         #expect(verdict(nil, matchedBefore: true, committed: true) == .finished(confirmed: true))
@@ -75,3 +77,21 @@ struct GoStepFeedbackTests {
         #expect(feedback("worked", repeats: true) == .notYet)
     }
 }
+
+/// Questions about the step being shown are answered from the step.
+struct GoStepQuestionTests {
+    @Test func questionsAboutThisStepAreRecognised() {
+        for heard in ["Where should I type it?", "Where?", "Which one?", "What do I type?", "Where do I click?",
+                      "Say that again", "Sorry, I didn't catch that", "I don't see it", "Where is it?"] {
+            #expect(GoGuidanceIntent.asksAboutCurrentStep(heard), "\(heard)")
+        }
+    }
+
+    @Test func newQuestionsAreNotMistakenForThem() {
+        for heard in ["Where is the Bold button?", "Where do I go to insert a chart?", "Make the title bold",
+                      "How do I add a chart?", "What's the weather like?"] {
+            #expect(!GoGuidanceIntent.asksAboutCurrentStep(heard), "\(heard)")
+        }
+    }
+}
+

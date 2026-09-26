@@ -94,6 +94,31 @@ nonisolated enum GoGuidanceIntent: Equatable, Sendable {
         return nil
     }
 
+    /// A question about the step Go is showing ("where should I type it?", "which
+    /// one?", "what do I type?", "say that again", "I don't see it"). Go answers
+    /// these from the step itself, so the thread isn't lost to a model that
+    /// doesn't know the step. Questions naming something else ("where is the Bold
+    /// button?") are screen questions, not these.
+    static func asksAboutCurrentStep(_ heard: String?) -> Bool {
+        guard let heard else { return false }
+        let text = RealtimeOpenAppTool.normalisedAnswer(heard)
+        let words = text.split(separator: " ").map(String.init)
+        guard !words.isEmpty, words.count <= 10 else { return false }
+        if words.count == 1, ["where", "which", "what", "huh", "sorry", "pardon"].contains(words[0]) { return true }
+        let padded = " " + text + " "
+        let refersBack = !Set(words).isDisjoint(with: ["it", "that", "this", "there", "here", "one", "them"])
+        let actsHere = !Set(words).isDisjoint(with: ["type", "click", "press", "put", "enter", "go", "write"])
+        let repeats = ["say that again", "say it again", "repeat that", "repeat it", "come again", "didn t catch", "didnt catch",
+                       "what do i type", "what should i type", "what do i press", "what should i press", "what do i click",
+                       "what should i click", "what was that"]
+        if repeats.contains(where: { padded.contains(" " + $0 + " ") }) { return true }
+        let lost = ["don t see", "dont see", "can t see", "cant see", "can t find", "cant find", "not seeing"]
+        if lost.contains(where: { padded.contains(" " + $0 + " ") }) { return refersBack }
+        // "Where do I type?" is about this step; "where do I go to insert a chart?" is a new question.
+        if words.contains("where") || words.contains("which") { return refersBack || (actsHere && words.count <= 5) }
+        return false
+    }
+
     /// A direct command ("open the photo called FT", "click Share") is a task Go
     /// performs itself through its planner, whatever app it concerns.
     private static func command(_ heard: String) -> GoGuidanceIntent? {

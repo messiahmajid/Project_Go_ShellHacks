@@ -27,7 +27,20 @@ final class RealtimeVoiceSession {
             // While Go acts, it shows each step and speaks only questions and the finish.
             self.guide.present(state, spoken: !(self.walkthrough.autopilot && state.phase == .waiting))
             self.onStateChange?(state.phase == .planning ? .processing : .idle)
+            // The notch shows Go working out the next step between voice turns.
+            // A step about to be spoken goes straight from thinking to speaking.
+            let spokenNext = state.phase == .waiting && !self.walkthrough.autopilot
+            if state.phase == .planning { GoNotch.shared.handle(.planningStarted) }
+            else if !spokenNext { GoNotch.shared.handle(.planningFinished) }
+            if state.verifiedSteps.count < self.tickedSteps { self.tickedSteps = state.verifiedSteps.count }
             if state.phase == .planning {
+                // A soft tick the moment Go registers the owner's step, so the wait for
+                // the next one isn't silent. (Scrolling to look isn't a finished step.)
+                if state.verifiedSteps.count > self.tickedSteps, !self.walkthrough.autopilot,
+                   state.verifiedSteps.last?.reveal != true {
+                    self.playTick(.release)
+                }
+                self.tickedSteps = state.verifiedSteps.count
                 // No praise yet: the next plan checks the finished step against the
                 // screen and says "nice" (or "not quite yet") with the next step.
                 // A typing step finished without reading its field is reported, so
@@ -39,6 +52,11 @@ final class RealtimeVoiceSession {
                 self.onGuideText?(self.phrases.say(.thinking))
             }
         }
+        // The owner did the step Go couldn't: Go carries on by itself.
+        coordinator.onResumeAutopilot = { [weak self] in
+            guard let self, self.liveTurn == nil else { return }
+            self.startAutopilot()
+        }
         coordinator.onOffTrack = { [weak self] state in
             guard let self, self.liveTurn == nil else { return }
             Task {
@@ -48,6 +66,8 @@ final class RealtimeVoiceSession {
         return coordinator
     }()
     private var phrases = GoPhrases()
+    /// Finished steps already acknowledged with a tick.
+    private var tickedSteps = 0
     /// Go asked "delete all your routines?" and waits for the owner's yes.
     private var pendingDeleteAllRoutines = false
     /// Guide text goes in the cursor's bubble.
@@ -587,6 +607,21 @@ final class RealtimeVoiceSession {
             marks.goHandlesTurn = true
             marks.walkthroughReply = text
             if walkthrough.state.phase != .waiting { onGuideText?(text) }
+            onStateChange?(.idle)
+            queueSpeech(text, for: turn)
+            return true
+        }
+        // A question about the step being shown ("where should I type it?"): answered
+        // from the step, pointing at it again, so the thread isn't lost.
+        if liveTurn === turn, let heard, walkthrough.state.phase == .waiting, walkthrough.state.step != nil,
+           GoGuidanceIntent.asksAboutCurrentStep(heard) {
+            marks.goHandlesTurn = true
+            turn.line.localIntent = "stepQuestion"
+            cancelQueuedSpeech(); turn.speechTasks.removeAll(); turn.speechBuffer = GoSpeechBuffer()
+            let text = walkthrough.currentStepExplanation()
+            marks.walkthroughReply = text
+            guide.present(walkthrough.state, spoken: false)
+            onGuideText?(text)
             onStateChange?(.idle)
             queueSpeech(text, for: turn)
             return true

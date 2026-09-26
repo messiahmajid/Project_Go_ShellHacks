@@ -41,6 +41,24 @@ struct GoNotchTests {
         #expect(GoNotchState.intent(title: "Figma").next(on: failed) == .didntTake(reason: "no app by that name"))
     }
 
+    @Test func goSpeakingAndPlanningShowOnlyWhenNothingMoreSpecificHoldsTheNotch() {
+        // Planning between steps, then the step spoken, then quiet.
+        var state = GoNotchState.idle
+        var names: [String] = []
+        for event: GoNotchEvent in [.planningStarted, .speechStarted, .speechFinished] {
+            state = state.next(on: event) ?? state
+            names.append(state.name)
+        }
+        #expect(names == ["thinking", "speaking", "idle"])
+        // Listening, an action, its result or a question keep the notch.
+        for held: GoNotchState in [.listening, .intent(title: "x"), .proof(subject: "x"), .needsYou] {
+            #expect(held.next(on: .speechStarted) == nil)
+            #expect(held.next(on: .planningStarted) == nil)
+        }
+        #expect(GoNotchState.speaking.next(on: .hotkeyDown) == .listening)   // talking over Go
+        #expect(GoNotchState.speaking.shape == .compact)
+    }
+
     @Test func aTicketHoldsNeedsYouUntilItIsAnswered() {
         let intent = GoNotchState.intent(title: "Terminal")
         #expect(intent.next(on: .confirmationRequired) == .needsYou)

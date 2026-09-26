@@ -225,6 +225,16 @@ nonisolated struct GoStepProposal: Codable, Equatable, Sendable {
     /// The planner's private checklist for a multi-part goal: returned when it is
     /// created or changes (finished lines start "done: "), nil when unchanged.
     var checklist: [String]? = nil
+    /// Where the plan's time went (token counts and provider time), for the log.
+    var usage: GoPlanUsage? = nil
+}
+
+nonisolated struct GoPlanUsage: Codable, Equatable, Sendable {
+    var providerMs: Int?
+    var promptTokens: Int?
+    var imageTokens: Int?
+    var thinkingTokens: Int?
+    var outputTokens: Int?
 }
 
 nonisolated struct GoRisk: Codable, Equatable, Sendable {

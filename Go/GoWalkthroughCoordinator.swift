@@ -125,6 +125,15 @@ final class GoWalkthroughCoordinator {
     /// The planner's working notes for the current goal (what it saw on screens
     /// that are no longer in view). Memory only; cleared with the goal.
     private(set) var notes: [String] = []
+    /// A step do-it-for-me handed to the owner; once they've done it, Go carries on
+    /// by itself (`onResumeAutopilot`).
+    private var handedBack: GoWalkthroughStep?
+    private var resumeAfterPlan = false
+    /// Restarts do-it-for-me (set by the voice session, which owns how actions run).
+    var onResumeAutopilot: (() -> Void)?
+    /// The next plan gets the screenshot whatever else holds (set after a plan
+    /// named a control that wasn't there).
+    private var screenshotNextPlan = false
     /// The planner's private checklist for the current goal; cleared with it.
     private(set) var checklist: [String] = []
     /// Short-term memory for resolving "it", "that", "there": (uptime, line).
@@ -217,10 +226,12 @@ final class GoWalkthroughCoordinator {
         Array(steps.dropLast(shownInFull).suffix(42)).map { String($0.instruction.prefix(240)) }
     }
 
-    /// A step on a control that opens something (a menu button, pop-up, combo box
-    /// or disclosure): its result often isn't in the Accessibility lists.
+    /// A step on something that opens a menu or panel (a menu-bar title, menu
+    /// button, pop-up, combo box or disclosure): what it opened often isn't in
+    /// the Accessibility lists.
     nonisolated static func opensSomething(_ step: GoWalkthroughStep) -> Bool {
-        ["AXMenuButton", "AXPopUpButton", "AXComboBox", "AXDisclosureTriangle"].contains(step.control?.role ?? "")
+        if let menu = step.menu, menu.path.count == 1 { return true }
+        return ["AXMenuButton", "AXPopUpButton", "AXComboBox", "AXDisclosureTriangle"].contains(step.control?.role ?? "")
     }
 
     /// Keeps a new planner note: trimmed, at most 280 characters, not a repeat,
@@ -322,6 +333,18 @@ final class GoWalkthroughCoordinator {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return nil }
         if let app = GoActiveApp.bundleIdentifier,
            await Task.detached(operation: { GoTextFields.secureFieldFocused(app: app) }).value { return nil }
+        // Just the app being used (its windows and anything they opened): a smaller,
+        // sharper picture than the whole display. The whole display when the app
+        // fills most of it, or when its area can't be found.
+        if let bundle = GoActiveApp.bundleIdentifier,
+           let pid = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first?.processIdentifier,
+           let region = ScreenCaptureUtility.appRegion(pid: pid),
+           let display = NSScreen.screens.first(where: { $0.frame.intersects(region) })?.frame,
+           region.intersection(display).width * region.intersection(display).height < display.width * display.height * 0.85,
+           let shot = try? await ScreenCaptureUtility.captureRegionAsJPEG(region),
+           let jpeg = RealtimeOpenAppTool.downscaledJPEG(shot.data, maxPixelDimension: 1280), jpeg.count <= 700_000 {
+            return (jpeg.base64EncodedString(), GoFrame(shot.frame))
+        }
         guard let screen = try? await ScreenCaptureUtility.captureAllScreensAsJPEG().first,
               let jpeg = RealtimeOpenAppTool.downscaledJPEG(screen.imageData, maxPixelDimension: 1280),
               jpeg.count <= 700_000 else { return nil }
@@ -350,6 +373,7 @@ final class GoWalkthroughCoordinator {
         if state.phase == .waiting, let step = state.step, state.completeByClick(step) {
             // "I did it": the next plan checks it before any praise.
             pendingCheck = (step, false, false, true)
+            noteOwnerFinished(step)
         }
         generation = UUID()
         watch.stop()
@@ -360,6 +384,8 @@ final class GoWalkthroughCoordinator {
 
     func stop() {
         clickedWhileSuspended = nil
+        handedBack = nil
+        resumeAfterPlan = false
         autopilot = false
         pausedForQuestion = false
         awaitingApproval = nil
@@ -473,6 +499,7 @@ final class GoWalkthroughCoordinator {
             await frontOwnersApp()
             var observation = try await readObservation(menus: true, allowPartial: true)
             let readAt = ProcessInfo.processInfo.systemUptime
+            let pulseAtRead = await Task.detached { [pulse] in pulse() }.value
             let shot = await captureTask.value
             let capturedAt = ProcessInfo.processInfo.systemUptime
             observation.screenFrame = shot?.frame
@@ -494,8 +521,10 @@ final class GoWalkthroughCoordinator {
             // What a menu button, pop-up or disclosure opened (a dropdown, gallery,
             // panel) is often outside the lists: the next plan needs to see it.
             let afterOpener = state.verifiedSteps.last.map(Self.opensSomething) ?? false
+            let asked = screenshotNextPlan
+            screenshotNextPlan = false
             // A partial read (a very large interface) leans on the screenshot too.
-            if sparse || afterReveal || afterOpener || !observation.complete || visualApps.contains(observation.app) {
+            if sparse || afterReveal || afterOpener || asked || !observation.complete || visualApps.contains(observation.app) {
                 context.screenshotJPEG = shot?.jpeg
             }
             context.recent = recent.map(\.line)
@@ -558,7 +587,10 @@ final class GoWalkthroughCoordinator {
                     "notes": Self.addingNote(proposal.note, to: notes).count, "noted": proposal.note != nil,
                     "checklistLines": proposal.checklist?.count ?? checklist.count,
                     "checklistDone": (proposal.checklist ?? checklist).filter { $0.lowercased().hasPrefix("done:") }.count,
-                    "checklistChanged": proposal.checklist != nil], toFileNamed: "go-walkthrough.log")
+                    "checklistChanged": proposal.checklist != nil,
+                    "providerMs": proposal.usage?.providerMs ?? -1, "promptTokens": proposal.usage?.promptTokens ?? -1,
+                    "imageTokens": proposal.usage?.imageTokens ?? -1, "thinkingTokens": proposal.usage?.thinkingTokens ?? -1,
+                    "outputTokens": proposal.usage?.outputTokens ?? -1], toFileNamed: "go-walkthrough.log")
             }
             guard token == generation, goalRevision == goals.state.revision, !Task.isCancelled else { return }
             // Launch steps name an app, and screen steps a box on the screenshot
@@ -567,12 +599,25 @@ final class GoWalkthroughCoordinator {
                !catalog.controls.contains(where: { $0.id == proposal.targetID }) && !catalog.menus.contains(where: { $0.id == proposal.targetID })
                && !catalog.fields.contains(where: { $0.id == proposal.targetID })
                && !catalog.systemControls.contains(where: { $0.id == proposal.targetID }) {
+                // A made-up target (usually something that just opened and isn't in the
+                // lists): look again with the screenshot before troubling the owner.
+                if attempt == 0 {
+                    remember("Go's last plan named a control that isn't listed; choose from the lists, or box it on the screenshot.")
+                    screenshotNextPlan = true
+                    return await replan(token, prefix: prefix, attempt: attempt,
+                                        reason: "I can't find that on screen right now. Can you point me to it, or ask me again?")
+                }
                 askSource = "targetNotObserved"
-                state.ask("The proposed control wasn't in the observed interface."); publish(); return
+                state.ask("I can't find that on screen right now. Can you point me to it, or ask me again?"); publish(); return
             }
             // Recheck the same interface after the network call. The proposal's
             // IDs belong to the earlier catalogue and must not be reinterpreted.
-            let fresh = try await readObservation(menus: false, expectedApp: observation.app, allowPartial: true)
+            // When the quick fingerprint shows nothing moved while planning, the
+            // screen is the one planned from, and the full re-read is skipped.
+            let pulseNow = await Task.detached { [pulse] in pulse() }.value
+            let unchanged = pulseAtRead != 0 && pulseAtRead == pulseNow
+            let fresh = unchanged ? observation
+                : try await readObservation(menus: false, expectedApp: observation.app, allowPartial: true)
             guard token == generation, goalRevision == goals.state.revision, !Task.isCancelled else { return }
             // A page that is still loading must not cost a whole new plan: the plan
             // stands if its target is still there, found again by role and name.
@@ -621,6 +666,11 @@ final class GoWalkthroughCoordinator {
             if state.phase == .waiting { lastStep = state.step }
             publish()
             armWatch()
+            if resumeAfterPlan {
+                resumeAfterPlan = false
+                // The step was just planned from the current screen: act on it as is.
+                if state.phase == .waiting, !autopilot { pausedForQuestion = true; onResumeAutopilot?() }
+            }
         } catch {
             guard token == generation else { return }
             // Right after a click the app is often mid-change; read again before giving up.
@@ -755,7 +805,8 @@ final class GoWalkthroughCoordinator {
                 if notTakingEffect >= 2, autopilot, token == generation, state.phase == .waiting, let again = state.step {
                     autopilot = false
                     askSource = "autopilotNoEffect"
-                    state.restore(again, message: "I tried that, but it didn't take. Can you do this one? " + again.instruction)
+                    state.restore(again, message: "I tried that, but it didn't take. Can you do this one? I'll carry on after. " + again.instruction)
+                    handedBack = state.step
                     publish()
                     armWatch()
                     return
@@ -769,7 +820,8 @@ final class GoWalkthroughCoordinator {
             case .retryable(let reason), .blocked(let reason):
                 autopilot = false
                 askSource = "autopilotStopped"
-                state.restore(step, message: "I couldn't do this one: \(reason). Can you do it? " + step.instruction)
+                state.restore(step, message: "I couldn't do this one: \(reason). Can you do it? I'll carry on after. " + step.instruction)
+                handedBack = state.step
                 publish()
                 armWatch()
                 return
@@ -818,9 +870,27 @@ final class GoWalkthroughCoordinator {
             return
         }
         guard state.completeByClick(step) else { return }
+        noteOwnerFinished(step)
         pendingCheck = (step, reacted, step.typeText != nil, true)
         publish()
         if state.phase == .planning { await planNext(generation: token) }
+    }
+
+    /// The answer to a question about the step being shown: where it is, then the
+    /// step again. The presenter points at it again alongside.
+    func currentStepExplanation() -> String {
+        guard state.phase == .waiting, let step = state.step else { return state.message }
+        let place = step.keyboard
+            ? (step.typeText != nil ? "Type it where I'm pointing, in what's selected now." : "Press it here, in this window.")
+            : "Right where I'm pointing."
+        return place + " " + step.instruction
+    }
+
+    /// The owner did the step Go handed them: carry on by itself after the next plan.
+    private func noteOwnerFinished(_ step: GoWalkthroughStep) {
+        guard let handed = handedBack, handed == step else { return }
+        handedBack = nil
+        resumeAfterPlan = true
     }
 
     /// The presenter finished the last step without seeing its result (a typing
@@ -886,7 +956,7 @@ final class GoWalkthroughCoordinator {
               token == generation, !suspended, goalRevision == goals.state.revision else { return }
         if state.observe(observation, now: now()) {
             // Finished by its expected result appearing: seen working.
-            if let done = state.verifiedSteps.last { pendingCheck = (done, true, false, true) }
+            if let done = state.verifiedSteps.last { pendingCheck = (done, true, false, true); noteOwnerFinished(done) }
             publish()
             if state.phase == .planning { await planNext(generation: token) }
         } else if state.noteOffTrack(observation, now: now()) {

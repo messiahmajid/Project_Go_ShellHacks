@@ -70,6 +70,7 @@ final class ElevenLabsTTSClient {
         let spoken = GoSpeechText.spoken(text)
         if let systemVoiceOverride { systemVoiceOverride(spoken); return }
         systemVoice.speak(AVSpeechUtterance(string: spoken))
+        showSpeakingInNotch()
     }
 
     private func speakWithProvider(_ text: String, generation: Int) async throws {
@@ -110,12 +111,49 @@ final class ElevenLabsTTSClient {
         guard generation == playbackGeneration else { throw CancellationError() }
 
         let player = try AVAudioPlayer(data: data)
+        player.isMeteringEnabled = true
         self.audioPlayer = player
         guard player.play() else {
             throw NSError(domain: "ElevenLabsTTS", code: -2,
                           userInfo: [NSLocalizedDescriptionKey: "Audio playback did not start"])
         }
+        showSpeakingInNotch()
         print("🔊 ElevenLabs TTS: playing \(data.count / 1024)KB audio")
+    }
+
+    private var notchWatch: Task<Void, Never>?
+
+    /// The notch shows Go speaking, its bars following the voice, until playback
+    /// ends (with a short grace, so back-to-back sentences don't blink it closed).
+    private func showSpeakingInNotch() {
+        guard systemVoiceOverride == nil,
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        GoNotch.shared.handle(.speechStarted)
+        notchWatch?.cancel()
+        notchWatch = Task { @MainActor [weak self] in
+            var quietSince: Date?
+            while !Task.isCancelled, let self {
+                if self.isPlaying {
+                    quietSince = nil
+                    GoNotch.shared.setSpeechLevel(self.outputLevel)
+                } else if let since = quietSince {
+                    if Date().timeIntervalSince(since) > 0.25 { break }
+                } else {
+                    quietSince = Date()
+                }
+                try? await Task.sleep(for: .milliseconds(33))
+            }
+            guard !Task.isCancelled else { return }
+            GoNotch.shared.handle(.speechFinished)
+        }
+    }
+
+    /// The ElevenLabs playback level, 0-1; nil for the system voice, which can't be measured.
+    private var outputLevel: CGFloat? {
+        guard let player = audioPlayer, player.isPlaying else { return nil }
+        player.updateMeters()
+        let decibels = player.averagePower(forChannel: 0)
+        return CGFloat(min(1, max(0, (decibels + 45) / 40)))
     }
 
     /// Whether speech is currently playing, from either voice.

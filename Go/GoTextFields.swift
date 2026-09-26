@@ -81,6 +81,22 @@ nonisolated enum GoTextFields {
         return value(focused, kAXValueAttribute)
     }
 
+    /// Where typing will land in the app: the selected cell or item of the
+    /// focused control, else the focused control itself. Nil when that is the
+    /// whole window or grid (too large to point at usefully) or unreadable.
+    static func focusFrame(app bundleIdentifier: String) -> CGRect? {
+        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else { return nil }
+        let application = AXUIElementCreateApplication(running.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.25)
+        guard let focused: AXUIElement = value(application, kAXFocusedUIElementAttribute) else { return nil }
+        let selected: [AXUIElement] = value(focused, kAXSelectedCellsAttribute) ?? value(focused, kAXSelectedChildrenAttribute) ?? []
+        let element = selected.first ?? focused
+        guard let axFrame = AccessibilityTreeWalker.copyFrame(from: element).frame, axFrame.width > 0, axFrame.height > 0 else { return nil }
+        let screen = CGDisplayBounds(CGMainDisplayID())
+        guard axFrame.width * axFrame.height <= screen.width * screen.height * 0.25 else { return nil }
+        return AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(axFrame, primaryDisplayHeightInPoints: screen.height)
+    }
+
     /// What is left to type when the focused field already holds `contents`:
     /// nothing when it is exactly the text, the rest when it holds only the
     /// beginning of it (the owner started typing), else the whole text.

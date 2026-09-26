@@ -121,9 +121,11 @@ nonisolated enum GoStepExecutor {
             }
             return .done
         }
-        // The kernel allowed and performed the press, but the app did not react:
-        // the same target, clicked with the pointer, is the same action.
-        if response["error"] as? String == "notVerified", step.control != nil, !step.opens,
+        // The kernel allowed the action, but the app refused it (performFailed: many
+        // grids, canvases and web views don't take Accessibility actions) or didn't
+        // react (notVerified): the same target, clicked with the pointer, is the
+        // same action, the way a person would do it.
+        if ["notVerified", "performFailed"].contains(response["error"] as? String ?? ""), step.control != nil, !step.opens,
            let outcome = await pointerClick(step, answer: answer) {
             await GoPointerApps.insert(step.app)
             return outcome

@@ -107,6 +107,58 @@ enum ScreenCaptureUtility {
         return capturedScreens
     }
 
+    /// The area on screen covered by an app's own windows (including any menu,
+    /// dropdown or popover it has open, which are its windows too), in AppKit
+    /// coordinates, with a small margin. Nil when it has no visible window.
+    nonisolated static func appRegion(pid: pid_t, margin: CGFloat = 16) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+        let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+        var region: CGRect?
+        for window in list {
+            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid,
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let cgRect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  cgRect.width > 4, cgRect.height > 4 else { continue }
+            // Window list bounds are top-left based; AppKit's are bottom-left.
+            let rect = CGRect(x: cgRect.minX, y: primaryHeight - cgRect.maxY, width: cgRect.width, height: cgRect.height)
+            region = region.map { $0.union(rect) } ?? rect
+        }
+        return region?.insetBy(dx: -margin, dy: -margin)
+    }
+
+    /// A sharp capture of just `region` (AppKit coordinates) on the display that
+    /// holds most of it, without Go's own windows. Returns the JPEG and the exact
+    /// area it shows. Nil when the region isn't on a display.
+    static func captureRegionAsJPEG(_ region: CGRect, maxPixelDimension: Int = 1600) async throws -> (data: Data, frame: CGRect)? {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        var screens: [(SCDisplay, CGRect)] = []
+        for display in content.displays {
+            guard let screen = NSScreen.screens.first(where: {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
+            }) else { continue }
+            screens.append((display, screen.frame))
+        }
+        guard let index = bestDisplayIndex(for: region, among: screens.map(\.1)) else { return nil }
+        let (display, displayFrame) = screens[index]
+        let area = region.intersection(displayFrame)
+        guard area.width > 16, area.height > 16 else { return nil }
+        let ownWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == appBundleIdentifier }
+        let configuration = SCStreamConfiguration()
+        // Display points, top-left origin.
+        configuration.sourceRect = CGRect(x: area.minX - displayFrame.minX, y: displayFrame.maxY - area.maxY,
+                                          width: area.width, height: area.height)
+        let scale = min(2.0, Double(maxPixelDimension) / Double(max(area.width, area.height)))
+        configuration.width = max(1, Int(area.width * scale))
+        configuration.height = max(1, Int(area.height * scale))
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: SCContentFilter(display: display, excludingWindows: ownWindows), configuration: configuration)
+        guard let data = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.9])
+        else { return nil }
+        return (data, area)
+    }
+
     nonisolated static func bestDisplayIndex(for windowFrame: CGRect, among displayFrames: [CGRect]) -> Int? {
         var bestIndex: Int?
         var bestIntersectionArea: CGFloat = 0

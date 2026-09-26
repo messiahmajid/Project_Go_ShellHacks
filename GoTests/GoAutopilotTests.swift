@@ -241,6 +241,49 @@ struct GoAutopilotTests {
         #expect(shownScreenshot.contains(true))
     }
 
+    @Test func aMadeUpTargetIsCheckedAgainOnTheScreenBeforeAskingTheOwner() async {
+        let app = App()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            plans += 1
+            // The first plan invents an ID; the second look, with the screenshot, names a real one.
+            return GoStepProposal(kind: .step, instruction: "Click Open.", targetID: plans == 1 ? "c99" : "c0", expected: nil)
+        }, capture: { ("/9j/", GoFrame(CGRect(x: 0, y: 0, width: 100, height: 100))) },
+           frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        _ = await coordinator.start()
+        #expect(plans == 2)
+        #expect(coordinator.state.phase == .waiting)
+        #expect(coordinator.state.step?.control?.name == "Open")
+
+        // Invented every time: the owner gets a plain question, never jargon.
+        let stubborn = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { _ in
+            GoStepProposal(kind: .step, instruction: "Click it.", targetID: "c99", expected: nil)
+        }, capture: { ("/9j/", GoFrame(CGRect(x: 0, y: 0, width: 100, height: 100))) },
+           frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        _ = await stubborn.start()
+        #expect(stubborn.state.phase == .needsInput)
+        #expect(stubborn.state.message == "I can't find that on screen right now. Can you point me to it, or ask me again?")
+    }
+
+    @Test func afterTheOwnerDoesAHandedBackStepGoCarriesOnByItself() async throws {
+        let app = App()
+        var resumed = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            context.verifiedSteps.isEmpty
+                ? GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+                : GoStepProposal(kind: .step, instruction: "Click Continue.", targetID: "c1", expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        coordinator.onResumeAutopilot = { resumed += 1 }
+        await coordinator.runForMe { _ in .retryable("it didn't work") }
+        #expect(coordinator.state.message.contains("I'll carry on after."))
+        let handed = try #require(coordinator.state.step)
+        _ = app.answer(#"{"verb":"press","title":"Open"}"#)   // the owner does it
+        await coordinator.targetClicked(handed)
+        #expect(resumed == 1)
+        #expect(coordinator.state.step?.control?.name == "Continue")
+        #expect(coordinator.pausedForQuestion)                  // acts on that fresh step, no second plan
+    }
+
     @Test func controlsThatOpenSomethingAreKnown() {
         func step(_ role: String) -> GoWalkthroughStep {
             GoWalkthroughStep(instruction: "Click it.", app: "a", windowToken: "w",
@@ -249,6 +292,9 @@ struct GoAutopilotTests {
         #expect(GoWalkthroughCoordinator.opensSomething(step("AXMenuButton")))
         #expect(GoWalkthroughCoordinator.opensSomething(step("AXPopUpButton")))
         #expect(!GoWalkthroughCoordinator.opensSomething(step("AXButton")))
+        let menuTitle = GoWalkthroughStep(instruction: "Open the Edit menu.", app: "a", windowToken: "w", control: nil,
+                                          menu: GoMenuTarget(id: "m0", path: ["Edit"]), expected: nil)
+        #expect(GoWalkthroughCoordinator.opensSomething(menuTitle))
     }
 
     @Test func notesKeepOnlyNewLinesAndTheLatestTen() {

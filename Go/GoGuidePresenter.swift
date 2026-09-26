@@ -305,7 +305,8 @@ final class GoGuidePresenter {
             // Can't see the field. A commit key after a matching read is still a
             // confirmed finish (Return often closes the editor it was read from).
             if committed { return .finished(confirmed: matchedBefore) }
-            return !needsCommit && quietSeconds > 4 ? .finished(confirmed: false) : .notYet(matched: false)
+            // Only a long pause counts here: people stop mid-formula to look things up.
+            return !needsCommit && quietSeconds > 10 ? .finished(confirmed: false) : .notYet(matched: false)
         }
         let matched = GoTextFields.matches(contents, typeText: text)
         if matched && (committed || (!needsCommit && matchedBefore)) { return .finished(confirmed: true) }
@@ -431,7 +432,8 @@ final class GoGuidePresenter {
                 guard token == self.generation, !Task.isCancelled, self.isCurrent(state) else { return }
                 self.point(rect, state.message)
                 // Clicking into a field only focuses it; the typed text finishes that step.
-                if let rect { self.watchClicks(around: rect, state: state, isFinal: Self.completesOnClick(step)) }
+                // Keyboard steps point at where typing lands; a click elsewhere isn't a wrong turn.
+                if let rect, !step.keyboard { self.watchClicks(around: rect, state: state, isFinal: Self.completesOnClick(step)) }
                 if let rect, step.menu == nil, step.launchApp == nil { self.trackTarget(step, from: rect, token: token) }
                 if let rect, let text = step.typeText {
                     self.followTyping(text, in: rect, step: step, needsReturn: step.pressReturn, token: token)
@@ -464,7 +466,13 @@ final class GoGuidePresenter {
             if log { MeasurementLogFile.appendJSONLine(record, toFileNamed: "go-grounding.log") }
             return rect
         }
-        if step.keyboard { return finish("keyboardStep") }
+        if step.keyboard {
+            // Point where the typing or keys will land (the selected cell, field or text).
+            let app = step.app
+            guard GoActiveApp.isActive(app), let rect = await Task.detached(operation: { GoTextFields.focusFrame(app: app) }).value
+            else { return finish("keyboardStep") }
+            return finish("pointedFocus", rect)
+        }
         if let app = step.launchApp {
             // Point at the app's Dock icon when it has one; clicking it opens the app.
             let rect = await Task.detached { GoMenuPointer.dockIcon(named: app) }.value

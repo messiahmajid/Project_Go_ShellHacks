@@ -26,7 +26,7 @@ test('planner receives the supplied goal and controls and returns a structured p
   assert.equal(options.headers['x-goog-api-key'],'test-key');
   return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(proposal)}]}}]});
  };
- try{const response=await handleGoPlan(request(context),'test-key');assert.equal(response.status,200);assert.deepEqual(await response.json(),proposal);}
+ try{const response=await handleGoPlan(request(context),'test-key');assert.equal(response.status,200);const {usage,...returned}=await response.json();assert.deepEqual(returned,proposal);assert.equal(typeof usage.providerMs,'number');}
  finally{globalThis.fetch=original;}
 });
 test('provider errors and incomplete results cannot become instructions', async()=>{

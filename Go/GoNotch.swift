@@ -29,6 +29,8 @@ nonisolated enum GoNotchState: Hashable, Sendable {
     case idle
     case listening
     case thinking
+    /// Go's own voice is playing (a step, a reply, a cue).
+    case speaking
     /// Text arrives already escaped. `title` is the whole line ("Opening Finder…");
     /// `subject` is what was verified.
     case intent(title: String)
@@ -41,6 +43,7 @@ nonisolated enum GoNotchState: Hashable, Sendable {
         case .idle: return "idle"
         case .listening: return "listening"
         case .thinking: return "thinking"
+        case .speaking: return "speaking"
         case .intent: return "intent"
         case .proof: return "proof"
         case .needsYou: return "needsYou"
@@ -51,7 +54,7 @@ nonisolated enum GoNotchState: Hashable, Sendable {
     var shape: GoNotchShape {
         switch self {
         case .idle: return .idle
-        case .listening, .thinking: return .compact
+        case .listening, .thinking, .speaking: return .compact
         case .intent, .proof, .needsYou, .didntTake: return .expanded
         }
     }
@@ -122,6 +125,16 @@ nonisolated enum GoNotchState: Hashable, Sendable {
             case .thinking, .intent, .needsYou: return .idle
             default: return nil
             }
+        // Go's voice and Go's planning between steps show only when nothing more
+        // specific (listening, an action, its result, a question) holds the notch.
+        case .speechStarted:
+            return self == .idle || self == .thinking ? .speaking : nil
+        case .speechFinished:
+            return self == .speaking ? .idle : nil
+        case .planningStarted:
+            return self == .idle ? .thinking : nil
+        case .planningFinished:
+            return self == .thinking ? .idle : nil
         }
     }
 }
@@ -138,6 +151,11 @@ nonisolated enum GoNotchEvent: Equatable, Sendable {
     case harnessAnswered(ok: Bool, subject: String, error: String?)
     case holdElapsed
     case turnEnded
+    case speechStarted
+    case speechFinished
+    /// Go is working out the next step between voice turns.
+    case planningStarted
+    case planningFinished
 }
 
 // MARK: - Reason map
@@ -377,7 +395,7 @@ final class GoNotch {
         state = next
         generation += 1
         model.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if next != .listening { model.level = 0 }
+        if next != .listening && next != .speaking { model.level = 0 }
         model.state = next
         let shown = generation
         if next == .idle {
@@ -409,6 +427,13 @@ final class GoNotch {
     func setLevel(rms: Float) {
         guard state == .listening else { return }
         model.level = GoNotchLevel.normalised(rms: rms)
+    }
+
+    /// Go's voice level, 0-1, while speaking (nil when it can't be measured; the
+    /// wave then moves on its own).
+    func setSpeechLevel(_ level: CGFloat?) {
+        guard state == .speaking else { return }
+        model.level = level ?? -1
     }
 
     private func placeOnScreenUnderCursor() {
@@ -460,8 +485,8 @@ private final class GoNotchModel: ObservableObject {
 // MARK: - Drawing
 
 private enum GoNotchStyle {
-    /// Used only for the proof ring and its glow.
-    static let proofCyan = Color(red: 0x3F / 255, green: 0xE0 / 255, blue: 0xFF / 255)
+    /// Go's green: the voice bars, the thinking dots and the proof ring.
+    static let green = DS.Colors.accent
     static let strokeWidth: CGFloat = 1.5
     static let spring = Animation.spring(response: 0.34, dampingFraction: 0.86)
 }
@@ -543,9 +568,11 @@ private struct GoNotchView: View {
     private var glyph: some View {
         switch model.state {
         case .listening:
-            ListeningBars(level: model.level)
+            VoiceBars(level: model.level, still: model.reduceMotion)
+        case .speaking:
+            VoiceBars(level: model.level, still: model.reduceMotion)
         case .thinking:
-            ThinkingDot(still: model.reduceMotion)
+            ThinkingDots(still: model.reduceMotion)
         case .intent, .proof:
             ArcRing(closed: { if case .proof = model.state { return true }; return false }(), still: model.reduceMotion)
         case .needsYou:
@@ -613,41 +640,62 @@ private struct NotchPillShape: Shape {
     }
 }
 
-private struct ListeningBars: View {
+/// Green bars that move with a voice: the owner's while listening, Go's while
+/// speaking. Each bar ripples on its own phase, and a small breath keeps them
+/// alive in pauses. A level below 0 means "can't be measured": they move on
+/// their own. Static heights under Reduce Motion.
+private struct VoiceBars: View {
     let level: CGFloat
-    /// The middle bar leads and the others follow, so it reads as a voice.
-    private static let weights: [CGFloat] = [0.5, 0.8, 1, 0.75, 0.45]
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(Self.weights.indices, id: \.self) { index in
-                Capsule()
-                    .fill(Color.white.opacity(0.85))
-                    .frame(width: 2, height: 3 + 11 * level * Self.weights[index])
-            }
-        }
-        .frame(height: 14)
-        .animation(.linear(duration: 0.08), value: level)
-    }
-}
-
-private struct ThinkingDot: View {
     let still: Bool
-    @State private var bright = false
+    /// The middle bars lead and the outer ones follow, so it reads as a voice.
+    private static let weights: [CGFloat] = [0.35, 0.6, 0.85, 1, 0.85, 0.6, 0.35]
 
     var body: some View {
-        Circle()
-            .fill(Color.white.opacity(0.7))
-            .frame(width: 5, height: 5)
-            .opacity(still ? 0.85 : (bright ? 1.0 : 0.6))
-            .onAppear {
-                guard !still else { return }
-                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) { bright = true }
+        TimelineView(.animation(paused: still)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            let measured = level >= 0
+            let base = measured ? level : 0.45 + 0.25 * CGFloat(sin(time * 3.1))
+            HStack(spacing: 1.5) {
+                ForEach(Self.weights.indices, id: \.self) { index in
+                    let ripple = still ? 0 : CGFloat(sin(time * 9 + Double(index) * 0.9)) * (0.12 + 0.35 * base)
+                    let breath = still ? 0.08 : 0.08 + 0.05 * CGFloat(sin(time * 2.2 + Double(index)))
+                    let height = 3 + 13 * min(1, max(breath, base * Self.weights[index] + ripple * Self.weights[index]))
+                    Capsule()
+                        .fill(LinearGradient(colors: [GoNotchStyle.green, GoNotchStyle.green.opacity(0.7)],
+                                             startPoint: .top, endPoint: .bottom))
+                        .frame(width: 2, height: height)
+                }
             }
+            .frame(height: 16)
+            .shadow(color: GoNotchStyle.green.opacity(0.55), radius: 3)
+        }
+        .animation(.easeOut(duration: 0.08), value: level)
     }
 }
 
-/// An open arc that turns while the harness works, then closes into a cyan
+/// Three green dots bouncing in turn while Go works out what to do.
+private struct ThinkingDots: View {
+    let still: Bool
+
+    var body: some View {
+        TimelineView(.animation(paused: still)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { index in
+                    let wave = still ? 0 : max(0, sin(time * 5 - Double(index) * 0.8))
+                    Circle()
+                        .fill(GoNotchStyle.green.opacity(0.55 + 0.45 * wave))
+                        .frame(width: 4, height: 4)
+                        .offset(y: -3 * wave)
+                }
+            }
+            .frame(height: 12)
+            .shadow(color: GoNotchStyle.green.opacity(0.4), radius: 2)
+        }
+    }
+}
+
+/// An open arc that turns while the harness works, then closes into a green
 /// ring when verified.
 private struct ArcRing: View {
     let closed: Bool
@@ -658,12 +706,12 @@ private struct ArcRing: View {
             let degrees = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.4) / 2.4 * 360
             ZStack {
                 Circle()
-                    .fill(GoNotchStyle.proofCyan)
+                    .fill(GoNotchStyle.green)
                     .scaleEffect(closed ? 0.62 : 0.2)
                     .opacity(closed ? 1 : 0)
                 Circle()
                     .trim(from: 0, to: closed ? 1 : 0.72)
-                    .stroke(closed ? GoNotchStyle.proofCyan : Color.white.opacity(0.7),
+                    .stroke(closed ? GoNotchStyle.green : Color.white.opacity(0.7),
                             style: StrokeStyle(lineWidth: GoNotchStyle.strokeWidth, lineCap: .round))
                     .rotationEffect(.degrees(closed || still ? -90 : degrees))
             }
@@ -679,7 +727,7 @@ private struct ProofGlow: View {
 
     var body: some View {
         Capsule()
-            .fill(GoNotchStyle.proofCyan)
+            .fill(GoNotchStyle.green)
             .frame(width: 56, height: 2)
             .blur(radius: 2.5)
             .modifier(TravelAlongEdge(progress: progress, width: width))
