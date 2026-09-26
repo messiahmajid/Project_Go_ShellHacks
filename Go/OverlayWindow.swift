@@ -2,7 +2,7 @@
 //  OverlayWindow.swift
 //  Go
 //
-//  The transparent, click-through overlay that draws the blue cursor, its
+//  The transparent, click-through overlay that draws Go's cursor, its
 //  bubbles and highlights. One overlay window per screen.
 //
 
@@ -86,7 +86,7 @@ nonisolated enum CursorNavigationMode {
 
 // Go's cursor for one screen. It shows only while the mouse is on this
 // screen, and turns into a waveform (listening) or spinner (processing).
-struct BlueCursorView: View {
+struct GoCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
     @ObservedObject var goController: GoController
@@ -297,13 +297,13 @@ struct BlueCursorView: View {
                     value: triangleRotationDegrees
                 )
 
-            BlueCursorWaveformView(audioPowerLevel: goController.currentAudioPowerLevel)
+            GoCursorWaveformView(audioPowerLevel: goController.currentAudioPowerLevel)
                 .opacity(cursorIsVisibleOnThisScreen && goController.voiceState == .listening ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: goController.voiceState)
 
-            BlueCursorSpinnerView()
+            GoCursorSpinnerView()
                 .opacity(cursorIsVisibleOnThisScreen && goController.voiceState == .processing ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
@@ -711,7 +711,7 @@ struct BlueCursorView: View {
 // MARK: - Waveform
 
 /// Replaces the triangle while push-to-talk is held.
-private struct BlueCursorWaveformView: View {
+private struct GoCursorWaveformView: View {
     let audioPowerLevel: CGFloat
 
     private let barCount = 5
@@ -750,7 +750,7 @@ private struct BlueCursorWaveformView: View {
 // MARK: - Spinner
 
 /// Replaces the triangle while Go works out its answer.
-private struct BlueCursorSpinnerView: View {
+private struct GoCursorSpinnerView: View {
     @State private var isSpinning = false
 
     var body: some View {
@@ -792,7 +792,7 @@ class OverlayWindowManager {
         for screen in screens {
             let window = OverlayWindow(screen: screen)
 
-            let contentView = BlueCursorView(
+            let contentView = GoCursorView(
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
                 goController: goController

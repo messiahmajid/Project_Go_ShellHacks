@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Milestone 2: local Finder checks, with no model or screenshots.
+"""Harness smoke test: checks Go's action layer on Finder, with no AI or screenshots.
 
 Run Go with --harness first. This opens one Finder window and leaves it open.
 No files are created, edited, or deleted. The report excludes file names.

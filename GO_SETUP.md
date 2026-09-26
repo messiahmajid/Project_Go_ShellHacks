@@ -1,6 +1,6 @@
 # Go local voice setup
 
-Go uses Gemini Live for speech input, reasoning, and tool calls. Go's accessibility harness resolves, checks, performs, and verifies actions. ElevenLabs speaks complete sentences as the reply arrives. System speech is used only for an error message.
+Go uses Gemini Live for speech input, reasoning, and tool calls. Go's accessibility harness resolves, checks, performs, and verifies actions. ElevenLabs speaks complete sentences as the reply arrives. If ElevenLabs fails (no credits, a rejected key, no network), the built-in macOS voice speaks the same words instead.
 
 Each short ElevenLabs audio segment is buffered before playback. Go starts a completed sentence while Gemini continues its reply; it does not yet stream the audio bytes within a sentence. Gemini still generates audio as part of the existing Live protocol, but Go does not play that audio.
 
@@ -58,7 +58,7 @@ Use separate push-to-talk turns:
 3. “Actually, change my goal to landscape.”
 4. “What is my goal now?”
 
-Go should recall portrait, then landscape. These requests store intent; they do not change the Word document. The small local record is at `~/Library/Application Support/Go/goal.json`, with owner-only access. Restarting Go should preserve it. “My goal is complete” makes it inactive. “Forget my goal” clears it. Live saving, recall, and goal update were confirmed by the user.
+Go should recall portrait, then landscape. These requests store intent; they do not change the Word document. The small local record is at `~/Library/Application Support/Go/goal.json`, with owner-only access. Restarting Go should preserve it. “My goal is complete” makes it inactive. “Forget my goal” clears it.
 
 ## Dynamic walkthrough check
 
@@ -66,7 +66,7 @@ There are no fixed workflows or fixed demo apps. From the app you want help with
 
 Go shows and speaks one instruction, then points when a unique, visible target can be resolved. Follow it and leave the app in front. After verification, Go automatically plans and presents the next instruction or a short question; you do not need to say “next.” The current step does not expire while you pause. Say “Stop the walkthrough” to stop observation. Changing or clearing the goal invalidates the old walkthrough. Control + Option interrupts speech and pointing.
 
-Guidance requests stay read-only. Goal storage is silent during guidance. For an unclear screen, the planner can request one fresh window screenshot through the existing guarded harness capture, sent to the configured Gemini service. That image provides context, not proof of completion. Incomplete AX reads, unsupported expected states, and unresolved controls still produce limitations. Closed menu children may not support pointing. Live validation of the full two-step spoken/visual flow remains pending.
+Guidance requests stay read-only. Goal storage is silent during guidance. When control names aren't enough (sparse or very large interfaces, icon-only controls, or right after something opened a menu or panel), the planner also receives a screenshot of the display, sent to the configured Gemini service. Nothing is captured while a password field has focus. Incomplete AX reads, unsupported expected states, and unresolved controls still produce a question or limitation.
 
 Worker validation:
 

@@ -3,15 +3,10 @@ worker/.dev.vars
 .DS_Store
 *.xcuserstate
 build/
-releases/
 .claude/
-coding-plans/
-docs/
-ob-docs/
 **/xcuserdata/
 CLAUDE.md
 AGENTS.md
-memory_bank/
 *.profraw
 .env
 Signing.local.xcconfig

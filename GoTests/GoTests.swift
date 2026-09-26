@@ -1801,8 +1801,8 @@ private func menuItemNode(_ label: String) -> AccessibilityElementNode {
 }
 
 @Test func anIncompleteSecureFieldCheckIsARefusalNotAPass() async throws {
-    // An empty or partial element list and a genuinely safe region both used to
-    // produce `.allow`. Every way the inspection can fall short must refuse.
+    // An empty or partial element list must never pass as a safe region: every
+    // way the inspection can fall short refuses.
     let clean = [typingNode(role: "AXButton", name: "Sign In"), typingNode(role: "AXTextField", name: "Email")]
     let prefix = "refusing to capture: the secure-field check could not inspect the whole region"
     #expect(ActionSafetyKernel.incompleteCaptureCheckRefusalPrefix == prefix)
@@ -2862,7 +2862,7 @@ private func mailShape(
         return
     }
     #expect(request.ticket == "abc")
-    // Still decoded and recorded; it just no longer lifts anything.
+    // Still decoded and recorded, but it lifts nothing.
     #expect(request.confirmed == true)
 }
 

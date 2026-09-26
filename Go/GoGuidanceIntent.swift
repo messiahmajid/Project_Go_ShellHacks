@@ -1,8 +1,8 @@
 import Foundation
 
 /// Decides locally, from the owner's own words, that a turn asks to be guided.
-/// The model no longer chooses whether a walkthrough starts: a guidance request
-/// always becomes one step, pointed at, and watched.
+/// Go, not the voice model, decides whether a walkthrough starts: a guidance
+/// request always becomes one step, pointed at, and watched.
 nonisolated enum GoGuidanceIntent: Equatable, Sendable {
     /// A new task in the owner's words, e.g. "creating a folder in Finder".
     case newTask(String)

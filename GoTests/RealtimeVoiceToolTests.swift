@@ -135,8 +135,8 @@ struct RealtimeVoiceToolTests {
         #expect(properties[kCGImagePropertyPixelHeight] as? Int == 512)
     }
 
-    /// The result no longer waits for the look, so the prompt must not name a
-    /// field the result stopped carrying.
+    /// The result doesn't wait for the look, so the prompt must not name a field
+    /// the result doesn't carry.
     @MainActor @Test func promptNamesNoFieldTheResultDoesNotCarry() {
         #expect(!RealtimeOpenAppTool.systemPrompt.contains("freshView"))
     }
