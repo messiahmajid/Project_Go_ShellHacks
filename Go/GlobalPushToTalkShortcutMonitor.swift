@@ -3,7 +3,8 @@
 //  Go
 //
 //  Watches for the push-to-talk shortcut system-wide with a listen-only
-//  CGEvent tap, so modifier-only shortcuts like Control + Option work.
+//  CGEvent tap, so modifier-only shortcuts like the right Option key or
+//  Control + Option work.
 //
 
 import AppKit
@@ -21,6 +22,10 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     /// Set only from the tap callback, which runs on the main run loop.
     /// Published so the overlay reacts to key release immediately.
     @Published private(set) var isShortcutCurrentlyPressed = false
+    /// The keys themselves are down (before any hold delay has passed).
+    private var physicallyHeld = false
+    /// A press waiting out the hold delay; another key cancels it (typing, not talking).
+    private var pendingPress: DispatchWorkItem?
 
     deinit {
         stop()
@@ -82,6 +87,9 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
     func stop() {
         isShortcutCurrentlyPressed = false
+        physicallyHeld = false
+        pendingPress?.cancel()
+        pendingPress = nil
 
         if let globalEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
@@ -107,22 +115,47 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let option = PushToTalkShortcut.currentShortcutOption
         let shortcutTransition = PushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,
             modifierFlagsRawValue: event.flags.rawValue,
-            wasShortcutPreviouslyPressed: isShortcutCurrentlyPressed
+            wasShortcutPreviouslyPressed: physicallyHeld,
+            option: option
         )
 
         switch shortcutTransition {
         case .none:
-            break
+            // Another key while a single-key press waits: that's typing (Option + e
+            // for é), not talking, so it never starts listening.
+            if eventType == .keyDown, let pending = pendingPress {
+                pending.cancel()
+                pendingPress = nil
+            }
         case .pressed:
-            isShortcutCurrentlyPressed = true
-            shortcutTransitionPublisher.send(.pressed)
+            physicallyHeld = true
+            if option.holdDelaySeconds > 0 {
+                pendingPress?.cancel()
+                let press = DispatchWorkItem { [weak self] in
+                    guard let self, self.physicallyHeld, self.pendingPress != nil else { return }
+                    self.pendingPress = nil
+                    self.isShortcutCurrentlyPressed = true
+                    self.shortcutTransitionPublisher.send(.pressed)
+                }
+                pendingPress = press
+                DispatchQueue.main.asyncAfter(deadline: .now() + option.holdDelaySeconds, execute: press)
+            } else {
+                isShortcutCurrentlyPressed = true
+                shortcutTransitionPublisher.send(.pressed)
+            }
         case .released:
-            isShortcutCurrentlyPressed = false
-            shortcutTransitionPublisher.send(.released)
+            physicallyHeld = false
+            pendingPress?.cancel()
+            pendingPress = nil
+            if isShortcutCurrentlyPressed {
+                isShortcutCurrentlyPressed = false
+                shortcutTransitionPublisher.send(.released)
+            }
         }
 
         return Unmanaged.passUnretained(event)

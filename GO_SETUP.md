@@ -33,7 +33,7 @@ Each short ElevenLabs audio segment is buffered before playback. Go starts a com
 
    Run the worker from **this** checkout. Only one worker can use port 8787, and the app talks to whichever one holds it. A worker left running from another copy of the project silently serves its older planner. Check with `ps -axo command | grep wrangler`.
 
-4. Open `Go.xcodeproj` and run the `Go` scheme. The menu panel shows `Gemini + ElevenLabs`. Hold Control + Option, speak, then release.
+4. Open `Go.xcodeproj` and run the `Go` scheme. The menu panel shows `Gemini + ElevenLabs`. Hold the right Option key (or Control + Option, if chosen in the panel), speak, then release.
 
 The key file and worker runtime directory are excluded from Git. API keys stay in the worker. The app receives a short-lived Gemini token and keeps the local client key in its existing preferences configuration.
 
@@ -64,7 +64,7 @@ Go should recall portrait, then landscape. These requests store intent; they do 
 
 There are no fixed workflows or fixed demo apps. From the app you want help with, say “Walk me through [your task].” The planner selects one next step from the actual goal and interface. A task that cannot be verified from the available controls must produce a question or limitation. Do not treat this as tested support for every app.
 
-Go shows and speaks one instruction, then points when a unique, visible target can be resolved. Follow it and leave the app in front. After verification, Go automatically plans and presents the next instruction or a short question; you do not need to say “next.” The current step does not expire while you pause. Say “Stop the walkthrough” to stop observation. Changing or clearing the goal invalidates the old walkthrough. Control + Option interrupts speech and pointing.
+Go shows and speaks one instruction, then points when a unique, visible target can be resolved. Follow it and leave the app in front. After verification, Go automatically plans and presents the next instruction or a short question; you do not need to say “next.” The current step does not expire while you pause. Say “Stop the walkthrough” to stop observation. Changing or clearing the goal invalidates the old walkthrough. Pressing the talk key interrupts speech and pointing.
 
 Guidance requests stay read-only. Goal storage is silent during guidance. When control names aren't enough (sparse or very large interfaces, icon-only controls, or right after something opened a menu or panel), the planner also receives a screenshot of the display, sent to the configured Gemini service. Nothing is captured while a password field has focus. Incomplete AX reads, unsupported expected states, and unresolved controls still produce a question or limitation.
 

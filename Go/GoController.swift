@@ -376,7 +376,7 @@ final class GoController: ObservableObject {
 
     /// Shows the short first-run instruction beside the cursor, after the welcome.
     func startOnboardingPrompt() {
-        let message = "hold Control + Option to talk"
+        let message = "hold \(PushToTalkShortcut.currentShortcutOption.holdPhrase) to talk"
         onboardingPromptText = ""
         showOnboardingPrompt = true
         onboardingPromptOpacity = 0.0

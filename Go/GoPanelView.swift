@@ -12,6 +12,11 @@ import SwiftUI
 struct GoPanelView: View {
     @ObservedObject var goController: GoController
     @ObservedObject var confirmations: HarnessConfirmations
+    /// The key held to talk (`PushToTalkShortcut`); the right Option key unless changed.
+    @AppStorage(PushToTalkShortcut.defaultsKey) private var talkKey = PushToTalkShortcut.ShortcutOption.rightOption.rawValue
+    private var talkOption: PushToTalkShortcut.ShortcutOption {
+        PushToTalkShortcut.ShortcutOption(rawValue: talkKey) ?? .rightOption
+    }
 
     private var isReady: Bool { goController.hasCompletedOnboarding && goController.allPermissionsGranted }
 
@@ -119,8 +124,9 @@ struct GoPanelView: View {
         GoPanelCard {
             HStack(spacing: 6) {
                 Text("Hold")
-                GoKeyCap(symbol: "⌃", name: "control")
-                GoKeyCap(symbol: "⌥", name: "option")
+                ForEach(talkOption.keyCaps, id: \.name) { key in
+                    GoKeyCap(symbol: key.symbol, name: key.name)
+                }
                 Text("and talk")
                 Spacer(minLength: 0)
             }
@@ -284,6 +290,18 @@ struct GoPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("Settings")
             GoPanelCard {
+                GoPanelRow(icon: "keyboard", tint: Color(hex: "#4A8FE7"), title: "Talk key", subtitle: "Hold it while you speak.") {
+                    Picker("Talk key", selection: $talkKey) {
+                        ForEach(PushToTalkShortcut.ShortcutOption.offered, id: \.rawValue) { option in
+                            Text(option.displayName).tag(option.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+                GoPanelRowDivider()
                 if isReady {
                     GoPanelSwitchRow(
                         icon: "cursorarrow.rays",

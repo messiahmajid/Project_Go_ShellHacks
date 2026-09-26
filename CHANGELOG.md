@@ -32,7 +32,7 @@
   passwords; paying, erasing and emptying the Trash are always refused.
 
 ### Voice
-- Push-to-talk (Control + Option) with Gemini Live; replies spoken by ElevenLabs.
+- Push-to-talk: hold the right Option key (or Control + Option, chosen in the panel), with Gemini Live; replies spoken by ElevenLabs.
 - All spoken text is also shown in full on screen.
 - If ElevenLabs is unavailable, the built-in macOS voice speaks instead.
 - Shortcuts are spoken as words, and formulas or links are referred to rather

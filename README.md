@@ -16,7 +16,7 @@ And this isn't just a "for us" thing. It's for anyone who's ever been lost in a 
 
 ## What it does
 
-Hold **Control + Option**, say what you want, let go.
+Hold the **right Option** key, say what you want, let go. (Rather use Control + Option? Switch it in the menu bar panel.)
 
 - **"How do I make a pivot table?"** The cursor flies to the right spot, highlights it, and walks you through one step at a time. It notices when you click and moves on. Click the wrong thing and it'll nudge you back.
 - **"Turn on Do Not Disturb."** Say it like a request instead of a question and Go just does it for you, checking that each step actually worked.
@@ -65,7 +65,7 @@ You'll need a Mac (macOS 14.2+), Xcode, Node.js, and API keys for Gemini and Ele
 
 4. **Run Go** from Xcode with ⌘R. macOS will ask for Accessibility, Screen Recording and Microphone permission. Say yes to all three.
 
-Now hold Control + Option and ask it something. If things act weird, [`GO_SETUP.md`](GO_SETUP.md) has some checks.
+Now hold the right Option key and ask it something. If things act weird, [`GO_SETUP.md`](GO_SETUP.md) has some checks.
 
 ## Stuff that's still rough
 
