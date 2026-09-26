@@ -215,6 +215,16 @@ nonisolated struct GoStepProposal: Codable, Equatable, Sendable {
     /// For a keyboard step (targetID "keyboard"): a key or shortcut such as
     /// "return", "tab" or "cmd+d", pressed after any `typeText`.
     var keys: String? = nil
+    /// The planner's look at the last finished step on this screen: "worked",
+    /// "notYet" or "unclear" (nil with no finished step). A string, so a new
+    /// value from a newer worker never breaks decoding.
+    var lastStep: String? = nil
+    /// Something this screen shows that a later step needs once it's out of view
+    /// (a layout, which sheet holds what, a name). Kept for the goal as a note.
+    var note: String? = nil
+    /// The planner's private checklist for a multi-part goal: returned when it is
+    /// created or changes (finished lines start "done: "), nil when unchanged.
+    var checklist: [String]? = nil
 }
 
 nonisolated struct GoRisk: Codable, Equatable, Sendable {

@@ -28,25 +28,15 @@ final class RealtimeVoiceSession {
             self.guide.present(state, spoken: !(self.walkthrough.autopilot && state.phase == .waiting))
             self.onStateChange?(state.phase == .planning ? .processing : .idle)
             if state.phase == .planning {
-                // Acknowledge a finished step at once, while the next is still being planned.
-                // A reveal ("look for …") finishing only means the owner moved; praise
-                // is for real progress.
-                // Praise only what Go saw work: a typing step it finished without being
-                // able to read the field gets no "nice", since the next plan may redo it.
-                let guessed = self.guide.unconfirmedCompletion != nil && self.guide.unconfirmedCompletion == state.verifiedSteps.last
-                self.guide.unconfirmedCompletion = nil
-                let finishedStep = state.verifiedSteps.count > self.acknowledgedSteps && !self.walkthrough.autopilot
-                    && state.verifiedSteps.last?.reveal != true && !guessed
-                self.acknowledgedSteps = state.verifiedSteps.count
-                if finishedStep {
-                    let ack = self.phrases.say(.stepDone)
-                    self.onGuideText?(ack)
-                    Task { try? await self.speechClient.speakText(ack) }
-                } else {
-                    self.onGuideText?(self.phrases.say(.thinking))
+                // No praise yet: the next plan checks the finished step against the
+                // screen and says "nice" (or "not quite yet") with the next step.
+                // A typing step finished without reading its field is reported, so
+                // only a visible change can earn praise.
+                if let guessed = self.guide.unconfirmedCompletion, guessed == state.verifiedSteps.last {
+                    self.walkthrough.lastCompletionWasGuessed()
                 }
-            } else if state.verifiedSteps.count < self.acknowledgedSteps {
-                self.acknowledgedSteps = state.verifiedSteps.count
+                self.guide.unconfirmedCompletion = nil
+                self.onGuideText?(self.phrases.say(.thinking))
             }
         }
         coordinator.onOffTrack = { [weak self] state in
@@ -60,8 +50,7 @@ final class RealtimeVoiceSession {
     private var phrases = GoPhrases()
     /// Go asked "delete all your routines?" and waits for the owner's yes.
     private var pendingDeleteAllRoutines = false
-    private var acknowledgedSteps = 0
-    /// Guide text goes in the blue cursor's bubble.
+    /// Guide text goes in the cursor's bubble.
     var onGuideText: ((String?) -> Void)?
     var onGuidePoint: ((CGRect?, String) -> Void)?
     var onGuideHighlight: ((CGRect?) -> Void)?
@@ -326,6 +315,8 @@ final class RealtimeVoiceSession {
             GoNotch.shared.handle(.turnEnded)
             continuation.finish()
             onStateChange?(.idle)
+            // Every way a turn ends hands the walkthrough back, or it stays paused.
+            walkthrough.resume()
             return
         }
         onStateChange?(.listening)
@@ -440,6 +431,9 @@ final class RealtimeVoiceSession {
             speechClient.stopPlayback()
             writeLiveTurnLine(errorKind: (error as? GoVoiceFailure)?.kind ?? GoVoiceFailure.kind(for: error, stage: RealtimeVoiceConnection.logName))
             GoNotch.shared.handle(.turnEnded)
+            // A failed turn still ends: the walkthrough resumes, and a click the owner
+            // made during it (kept until now) counts.
+            walkthrough.resume()
             if !Task.isCancelled {
                 errorSpeech.speak(AVSpeechUtterance(string: "Go could not get a response. Please check the voice service connection."))
             }
@@ -701,7 +695,7 @@ final class RealtimeVoiceSession {
         line.holdMs = Self.milliseconds(from: liveTurn.pressedUptime, to: released)
         line.bargedIn = bargedIn
         line.errorKind = errorKind
-        line.speechProvider = "elevenlabs"
+        line.speechProvider = speechClient.lastFallbackReason.map { "system:" + $0 } ?? "elevenlabs"
         line.ttsRequestMs = Self.milliseconds(from: released, to: liveTurn.speechRequestedUptime)
         line.spokenAudioStartedMs = Self.milliseconds(from: released, to: liveTurn.speechStartedUptime)
         line.notchTransitions = GoNotch.shared.transitions.filter { $0.uptime >= liveTurn.pressedUptime }.map { transition in

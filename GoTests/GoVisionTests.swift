@@ -328,6 +328,8 @@ struct GoReactionWaitTests {
         private let lock = NSLock()
         private var changeAt: Date?
         func click(reactingAfter seconds: Double?) { lock.lock(); changeAt = seconds.map { Date().addingTimeInterval($0) }; lock.unlock() }
+        /// The app's quick fingerprint: it changes when the app reacts.
+        func pulse() -> Int { lock.lock(); defer { lock.unlock() }; return (changeAt.map { Date() >= $0 } ?? false) ? 1 : 0 }
         func answer(_ line: String) -> String {
             if line.contains("\"menus\"") { return #"{"ok":true,"items":[]}"# }
             lock.lock(); let changed = changeAt.map { Date() >= $0 } ?? false; lock.unlock()
@@ -347,7 +349,7 @@ struct GoReactionWaitTests {
             context.verifiedSteps.isEmpty
                 ? GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
                 : GoStepProposal(kind: .done, instruction: "Done.", targetID: nil, expected: nil)
-        }, capture: { nil }, frontmostApp: { "any.app" }, logTransitions: false)
+        }, capture: { nil }, frontmostApp: { "any.app" }, pulse: { app.pulse() }, logTransitions: false)
         _ = await coordinator.start()
         guard let step = coordinator.state.step else { Issue.record("no step"); return .zero }
         app.click(reactingAfter: seconds)

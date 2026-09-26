@@ -51,3 +51,27 @@ struct GoTypingCompletionTests {
         #expect(!GoWalkthroughCoordinator.repeatsTyping(done: step(nil), next: step("=C2-B2")))
     }
 }
+
+/// Praise and "not quite yet" come from checking the finished step, never from
+/// the owner's activity alone.
+struct GoStepFeedbackTests {
+    private func feedback(_ verdict: String?, reacted: Bool = false, typed: Bool = false, repeats: Bool = false,
+                          reveal: Bool = false) -> GoWalkthroughCoordinator.StepFeedback? {
+        GoWalkthroughCoordinator.feedback(verdict: verdict, check: (reacted, typed), repeatsTyping: repeats, reveal: reveal)
+    }
+
+    @Test func praiseNeedsTheStepToBeSeenWorking() {
+        #expect(feedback("worked") == .praise)
+        #expect(feedback("unclear") == nil)                    // can't tell: say nothing
+        #expect(feedback(nil) == nil)
+        #expect(feedback("unclear", reacted: true) == .praise) // Go saw the screen change
+        #expect(feedback("unclear", typed: true) == .praise)   // Go read the typed text
+        #expect(feedback("worked", reveal: true) == nil)       // scrolling isn't progress
+        #expect(feedback("unclear", reacted: true, reveal: true) == nil)
+    }
+
+    @Test func aStepThatDidNotTakeIsCalledOut() {
+        #expect(feedback("notYet", reacted: true, typed: true) == .notYet)
+        #expect(feedback("worked", repeats: true) == .notYet)
+    }
+}

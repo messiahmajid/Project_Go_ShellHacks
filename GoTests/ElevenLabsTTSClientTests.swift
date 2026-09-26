@@ -35,11 +35,11 @@ private final class DeferredTTSProtocol: URLProtocol, @unchecked Sendable {
 @MainActor
 @Suite(.serialized)
 struct ElevenLabsTTSClientTests {
-    private func client() -> ElevenLabsTTSClient {
+    private func client(systemVoice: @escaping (String) -> Void = { _ in }) -> ElevenLabsTTSClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DeferredTTSProtocol.self]
         return ElevenLabsTTSClient(proxyURL: "https://voice-test.invalid/tts",
-                                   session: URLSession(configuration: configuration))
+                                   session: URLSession(configuration: configuration), systemVoice: systemVoice)
     }
     private func pendingRequest() async throws -> DeferredTTSProtocol {
         for _ in 0..<200 {
@@ -66,18 +66,19 @@ struct ElevenLabsTTSClientTests {
         }
     }
 
-    @Test func providerFailureDoesNotStartPlayback() async throws {
-        let tts = client()
+    @Test func aProviderFailureFallsBackToTheSystemVoice() async throws {
+        var systemSpoke: [String] = []
+        let tts = client { systemSpoke.append($0) }
         let task = Task { try await tts.speakText("Test reply") }
         let request = try await pendingRequest()
         request.finish(status: 402, data: Data("Unavailable voice".utf8))
-        do {
-            try await task.value
-            Issue.record("A failed provider request was accepted")
-        } catch {
-            #expect((error as NSError).domain == "ElevenLabsTTS")
-            #expect((error as NSError).code == 402)
-            #expect(!tts.isPlaying)
-        }
+        // The reply is still spoken, by the system voice; the turn doesn't fail.
+        try await task.value
+        #expect(systemSpoke == ["Test reply"])
+        #expect(tts.lastFallbackReason == "http402")
+        // An account error skips ElevenLabs for a while: no request, straight to the system voice.
+        try await tts.speakText("Next one")
+        #expect(DeferredTTSProtocol.takePending() == nil)
+        #expect(systemSpoke == ["Test reply", "Next one"])
     }
 }

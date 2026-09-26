@@ -151,9 +151,9 @@ struct GoWalkthroughCoordinatorTests {
         #expect(coordinator.state.verifiedSteps.count == 1)
         #expect(coordinator.state.phase == .needsInput)
         for _ in 0..<100 where spoken.count < 2 { await Task.yield() }
-        // The acknowledgement for a completed step is spoken by the session the moment
-        // it completes, so the next instruction itself carries no prefix.
-        #expect(spoken == ["Press Open.", "What would you like to do here?"])
+        // The step was seen working (its expected control appeared), so the praise
+        // comes with the next message, after that check, never before it.
+        #expect(spoken == ["Press Open.", "Nice. What would you like to do here?"])
     }
 
     @Test func changedGoalCannotAcceptAnOldPlannerAnswer() async throws {

@@ -143,6 +143,93 @@ struct GoAutopilotTests {
         #expect(coordinator.state.phase == .done)
     }
 
+    @Test func anActionThatNeverTakesEffectIsHandedOverNotLooped() async {
+        let app = App()
+        var attempts = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            var again = GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+            again.lastStep = context.verifiedSteps.isEmpty ? nil : "notYet"
+            return again
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        // Each press changes the screen (so it isn't "nothing changed"), but the
+        // planner keeps seeing the step not take effect.
+        await coordinator.runForMe { step in
+            attempts += 1
+            return await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
+        }
+        #expect(attempts == 2)
+        #expect(!coordinator.autopilot)
+        #expect(coordinator.state.phase == .waiting)
+        #expect(coordinator.state.message.hasPrefix("I tried that, but it didn't take."))
+    }
+
+    @Test func whatThePlannerNotesOnOneScreenReachesTheNextPlan() async {
+        let app = App()
+        var seenNotes: [[String]] = []
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            seenNotes.append(context.notes)
+            guard context.verifiedSteps.isEmpty else {
+                return GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
+            }
+            var step = GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+            step.note = "Targets sheet: A=Region, B=Target, rows 2-6"
+            return step
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe { step in
+            await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
+        }
+        #expect(seenNotes == [[], ["Targets sheet: A=Region, B=Target, rows 2-6"]])
+        // A new task starts with a clean page: its first plan sees no old notes.
+        _ = await coordinator.start()
+        #expect(seenNotes.last == [])
+    }
+
+    @Test func theChecklistIsKeptUntilThePlannerRevisesIt() async {
+        let app = App()
+        var seen: [[String]] = []
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            seen.append(context.checklist)
+            switch context.verifiedSteps.count {
+            case 0:
+                var step = GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+                step.checklist = ["open the file", "need: which column holds sales", "  "]
+                return step
+            case 1:
+                return GoStepProposal(kind: .step, instruction: "Click Continue.", targetID: "c1", expected: nil) // unchanged
+            default:
+                return GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
+            }
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe { step in
+            await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
+        }
+        // Sent back on every later plan, blank lines dropped; kept while the planner says nothing new.
+        #expect(seen == [[], ["open the file", "need: which column holds sales"], ["open the file", "need: which column holds sales"]])
+        _ = await coordinator.start()
+        #expect(seen.last == [])      // a new task starts without it
+    }
+
+    @Test func aChecklistIsShortAndTidy() {
+        let long = String(repeating: "y", count: 200)
+        let kept = GoWalkthroughCoordinator.cleanedChecklist([" a ", "", long, "b", "c", "d", "e", "f", "g"])
+        #expect(kept.count == 6)
+        #expect(kept.first == "a")
+        #expect(kept[1].count == 140)
+    }
+
+    @Test func notesKeepOnlyNewLinesAndTheLatestTen() {
+        var notes: [String] = []
+        notes = GoWalkthroughCoordinator.addingNote("  Sheet2 holds targets ", to: notes)
+        notes = GoWalkthroughCoordinator.addingNote("sheet2 holds targets", to: notes)   // a repeat
+        notes = GoWalkthroughCoordinator.addingNote(nil, to: notes)
+        notes = GoWalkthroughCoordinator.addingNote("   ", to: notes)
+        #expect(notes == ["Sheet2 holds targets"])
+        for index in 0..<12 { notes = GoWalkthroughCoordinator.addingNote("note \(index)", to: notes) }
+        #expect(notes.count == 10)
+        #expect(notes.last == "note 11")
+        #expect(GoWalkthroughCoordinator.addingNote(String(repeating: "x", count: 400), to: []).first?.count == 280)
+    }
+
     @Test func aFailedStepIsRetriedOnceThenHandedBack() async {
         let app = App()
         var attempts = 0

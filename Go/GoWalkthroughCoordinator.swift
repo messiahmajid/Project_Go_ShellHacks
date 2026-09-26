@@ -114,6 +114,19 @@ final class GoWalkthroughCoordinator {
     private var lastOwnerApp: NSRunningApplication?
     private var activationObserver: Any?
     private var phrases = GoPhrases()
+    /// The step just finished, waiting for the next plan to confirm it worked:
+    /// `reacted` (the screen changed), `typedMatch` (the field held the text),
+    /// `byOwner` (the owner did it; praise is only for them).
+    private var pendingCheck: (step: GoWalkthroughStep, reacted: Bool, typedMatch: Bool, byOwner: Bool)?
+    /// The planner's verdict on the last finished step, from the latest plan.
+    private(set) var lastVerdict: String?
+    /// A cheap fingerprint of the app in front, to see an action land (`GoScreenPulse`).
+    private let pulse: @Sendable () -> Int
+    /// The planner's working notes for the current goal (what it saw on screens
+    /// that are no longer in view). Memory only; cleared with the goal.
+    private(set) var notes: [String] = []
+    /// The planner's private checklist for the current goal; cleared with it.
+    private(set) var checklist: [String] = []
     /// Short-term memory for resolving "it", "that", "there": (uptime, line).
     private var recent: [(at: TimeInterval, line: String)] = []
 
@@ -204,6 +217,35 @@ final class GoWalkthroughCoordinator {
         Array(steps.dropLast(shownInFull).suffix(42)).map { String($0.instruction.prefix(240)) }
     }
 
+    /// Keeps a new planner note: trimmed, at most 280 characters, not a repeat,
+    /// and only the latest 10.
+    nonisolated static func addingNote(_ note: String?, to notes: [String]) -> [String] {
+        guard let line = note?.trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty,
+              !notes.contains(where: { $0.caseInsensitiveCompare(line) == .orderedSame }) else { return notes }
+        return Array((notes + [String(line.prefix(280))]).suffix(10))
+    }
+
+    /// A checklist as kept: trimmed, non-empty lines of at most 140 characters,
+    /// at most 6 of them.
+    nonisolated static func cleanedChecklist(_ lines: [String]) -> [String] {
+        Array(lines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            .map { String($0.prefix(140)) }.prefix(6))
+    }
+
+    enum StepFeedback: Equatable { case praise, notYet }
+
+    /// What to say about the step the owner just finished, from the planner's
+    /// look at the screen and Go's own evidence. Nil says nothing: Go couldn't
+    /// tell, so it neither praises nor corrects.
+    nonisolated static func feedback(verdict: String?, check: (reacted: Bool, typedMatch: Bool),
+                                     repeatsTyping: Bool, reveal: Bool) -> StepFeedback? {
+        if verdict == "notYet" || repeatsTyping { return .notYet }
+        if reveal { return nil }
+        if verdict == "worked" { return .praise }
+        // "unclear" (or an older worker): praise only with Go's own evidence.
+        return check.reacted || check.typedMatch ? .praise : nil
+    }
+
     /// Whether `next` asks for the same text, in the same app, as the step just finished.
     nonisolated static func repeatsTyping(done: GoWalkthroughStep, next: GoWalkthroughStep) -> Bool {
         guard let typed = done.typeText, let again = next.typeText, done.app == next.app else { return false }
@@ -226,9 +268,10 @@ final class GoWalkthroughCoordinator {
          capture: @escaping Capture = GoWalkthroughCoordinator.captureScreen,
          frontmostApp: @escaping @MainActor () -> String? = { GoActiveApp.bundleIdentifier },
          now: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         pulse: @escaping @Sendable () -> Int = { GoScreenPulse.current() },
          logTransitions: Bool = true) {
         self.goals = goals; self.answer = answer; self.planner = planner; self.capture = capture
-        self.frontmostApp = frontmostApp; self.now = now
+        self.frontmostApp = frontmostApp; self.now = now; self.pulse = pulse
         self.logTransitions = logTransitions
         let own = Bundle.main.bundleIdentifier
         lastOwnerApp = NSWorkspace.shared.frontmostApplication.flatMap { $0.bundleIdentifier == own ? nil : $0 }
@@ -282,9 +325,10 @@ final class GoWalkthroughCoordinator {
     func start() async -> [String: Any] {
         stop()
         guard goals.activeGoal != nil else { return ["ok": false, "message": "Tell me your goal first."] }
-        state = GoWalkthroughState()
+        state = GoWalkthroughState(); notes = []; checklist = []
         goalRevision = goals.state.revision
         goalID = goals.activeGoal?.id
+        pendingCheck = nil
         await planNext(generation: generation)
         return status()
     }
@@ -297,11 +341,14 @@ final class GoWalkthroughCoordinator {
         if ownerAnswered, let goal = goals.activeGoal, goal.id == goalID { goalRevision = goals.state.revision }
         guard goals.activeGoal != nil, goalRevision == goals.state.revision,
               state.phase != .stopped, state.phase != .idle else { return await start() }
-        if state.phase == .waiting, let step = state.step { _ = state.completeByClick(step) }
+        if state.phase == .waiting, let step = state.step, state.completeByClick(step) {
+            // "I did it": the next plan checks it before any praise.
+            pendingCheck = (step, false, false, true)
+        }
         generation = UUID()
         watch.stop()
         if state.phase == .done { publish(); return status() }
-        await planNext(generation: generation, prefix: state.verifiedSteps.isEmpty ? nil : phrases.say(.stepDone) + " ")
+        await planNext(generation: generation)
         return status()
     }
 
@@ -431,7 +478,8 @@ final class GoWalkthroughCoordinator {
             var context = GoPlanningContext(goal: goal, observation: catalog,
                                             verifiedSteps: Array(state.verifiedSteps.suffix(8)),
                                             catalogLimited: catalog.controls.count < observation.controls.count || catalog.menus.count < observation.menus.count,
-                                            earlierSteps: Self.earlierSteps(state.verifiedSteps, shownInFull: 8))
+                                            earlierSteps: Self.earlierSteps(state.verifiedSteps, shownInFull: 8), notes: notes,
+                                            checklist: checklist)
             // Screenshots cost about 3 s per plan, so they are sent when names aren't
             // enough: sparse accessibility, apps that needed one before, or on request.
             let sparse = catalog.controls.count < 20 || (catalog.menus.isEmpty && catalog.controls.count < 40)
@@ -492,7 +540,12 @@ final class GoWalkthroughCoordinator {
                     "readMs": ms(startedAt, readAt), "captureWaitMs": ms(readAt, capturedAt), "planMs": ms(capturedAt, now),
                     "vision": context.screenshotJPEG != nil, "controls": catalog.controls.count,
                     "observedControls": observation.controls.count, "walkMs": lastReadSplit?.walkMs ?? -1,
-                    "extrasMs": lastReadSplit?.extrasMs ?? -1], toFileNamed: "go-walkthrough.log")
+                    "extrasMs": lastReadSplit?.extrasMs ?? -1, "lastStep": proposal.lastStep ?? "none",
+                    // Counts only: notes and checklist hold screen content, which is never logged.
+                    "notes": Self.addingNote(proposal.note, to: notes).count, "noted": proposal.note != nil,
+                    "checklistLines": proposal.checklist?.count ?? checklist.count,
+                    "checklistDone": (proposal.checklist ?? checklist).filter { $0.lowercased().hasPrefix("done:") }.count,
+                    "checklistChanged": proposal.checklist != nil], toFileNamed: "go-walkthrough.log")
             }
             guard token == generation, goalRevision == goals.state.revision, !Task.isCancelled else { return }
             // Launch steps name an app, and screen steps a box on the screenshot
@@ -535,11 +588,18 @@ final class GoWalkthroughCoordinator {
                 state.refineScreenRect(exact)
             }
             state.applyRisk(proposal.risk, warnOwner: !autopilot)
-            // The same text asked for again right after a typing step: it isn't done
-            // yet (a typo, or it wasn't confirmed). Say so rather than start afresh.
-            if !autopilot, state.phase == .waiting, let next = state.step, let done = state.verifiedSteps.last,
-               Self.repeatsTyping(done: done, next: next) {
-                state.prefixMessage("Not quite yet. ")
+            // The last step, checked against this screen before any praise.
+            lastVerdict = proposal.lastStep
+            notes = Self.addingNote(proposal.note, to: notes)
+            if let revised = proposal.checklist { checklist = Self.cleanedChecklist(revised) }
+            if let check = pendingCheck, check.step == state.verifiedSteps.last {
+                pendingCheck = nil
+                if check.byOwner, !autopilot, prefix == nil,
+                   let feedback = Self.feedback(verdict: proposal.lastStep, check: (check.reacted, check.typedMatch),
+                                                repeatsTyping: state.step.map { Self.repeatsTyping(done: check.step, next: $0) } ?? false,
+                                                reveal: check.step.reveal) {
+                    state.prefixMessage(feedback == .notYet ? "Not quite yet. " : phrases.say(.stepDone) + " ")
+                }
             }
             if state.phase == .waiting, let step = state.step {
                 remember((step.final ? "Go pointed at " : "Go's next step: ") + step.targetDescription + Self.inApp(step.app))
@@ -621,7 +681,7 @@ final class GoWalkthroughCoordinator {
         guard goals.activeGoal != nil else { return }
         if goalRevision != goals.state.revision || state.phase == .stopped || state.phase == .idle {
             // A new or restarted task begins from the current screen.
-            generation = UUID(); state = GoWalkthroughState(); goalRevision = goals.state.revision; goalID = goals.activeGoal?.id
+            generation = UUID(); state = GoWalkthroughState(); notes = []; checklist = []; goalRevision = goals.state.revision; goalID = goals.activeGoal?.id
         }
         // Resuming after Go's own question ("want me to go ahead?") performs that
         // step. Taking over a step Go was showing the owner looks again first: they
@@ -634,6 +694,7 @@ final class GoWalkthroughCoordinator {
         suspended = false
         if state.phase != .waiting || !resuming { await planNext(generation: generation) }
         var failures = 0
+        var notTakingEffect = 0
         var lastDone: (signature: String, context: Int)?
         while autopilot, !Task.isCancelled, state.phase == .waiting, let step = state.step {
             let token = generation
@@ -659,6 +720,7 @@ final class GoWalkthroughCoordinator {
             }
             // The same action on an unchanged screen means the last one did nothing.
             let repeated = lastDone.map { $0.signature == step.signature && $0.context == step.contextHash } ?? false
+            let beforeAction = await Task.detached { [pulse] in pulse() }.value
             let outcome = repeated ? .retryable("nothing seemed to change") : await perform(step)
             if logTransitions {
                 MeasurementLogFile.appendJSONLine(["kind": "autopilot", "time": Date().timeIntervalSince1970, "stepKind": step.kindLabel,
@@ -669,10 +731,22 @@ final class GoWalkthroughCoordinator {
             case .done:
                 failures = 0
                 lastDone = (step.signature, step.contextHash)
-                await waitForReaction(from: step.contextHash, cap: .milliseconds(300), after: "act")
+                let reacted = await waitForPulse(from: beforeAction, cap: .milliseconds(300), after: "act")
                 guard autopilot, token == generation, state.completeByClick(step) else { break }
+                pendingCheck = (step, reacted, false, false)
                 publish()
                 if state.phase == .planning { await planNext(generation: token) }
+                // Go's action "succeeded" but the planner saw no effect, twice in a
+                // row: stop repeating it and hand it over rather than loop.
+                notTakingEffect = lastVerdict == "notYet" ? notTakingEffect + 1 : 0
+                if notTakingEffect >= 2, autopilot, token == generation, state.phase == .waiting, let again = state.step {
+                    autopilot = false
+                    askSource = "autopilotNoEffect"
+                    state.restore(again, message: "I tried that, but it didn't take. Can you do this one? " + again.instruction)
+                    publish()
+                    armWatch()
+                    return
+                }
             case .retryable(let reason) where failures == 0:
                 failures = 1
                 _ = reason
@@ -723,21 +797,50 @@ final class GoWalkthroughCoordinator {
         // The owner's click is seen on mouse-down; apps act on mouse-up. The screen
         // read now is the one the click will replace, even on a page that kept
         // loading after this step was planned.
-        let atClick = (try? await readObservation(menus: false))?.contextHash ?? step.contextHash
-        await waitForReaction(from: atClick, cap: .milliseconds(450), after: "click")
+        let atClick = await Task.detached { [pulse] in pulse() }.value
+        let reacted = await waitForPulse(from: atClick, cap: .milliseconds(450), after: "click")
         guard token == generation, !autopilot, goalRevision == goals.state.revision else { return }
         if suspended {
             if state.phase == .waiting, state.step == step { clickedWhileSuspended = step }
             return
         }
         guard state.completeByClick(step) else { return }
+        pendingCheck = (step, reacted, step.typeText != nil, true)
         publish()
         if state.phase == .planning { await planNext(generation: token) }
     }
 
+    /// The presenter finished the last step without seeing its result (a typing
+    /// step whose field couldn't be read): only a changed screen counts now.
+    func lastCompletionWasGuessed() {
+        pendingCheck?.typedMatch = false
+    }
+
+    /// Waits until a cheap fingerprint of the app in front changes (see
+    /// `GoScreenPulse`), or until `cap`, then gives it a moment to settle. The
+    /// planning read that follows is the full one.
+    private func waitForPulse(from baseline: Int, cap: Duration, after action: String) async -> Bool {
+        let clock = ContinuousClock()
+        let started = clock.now
+        var reacted = false
+        while clock.now - started < cap, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(40))
+            if await Task.detached(operation: { [pulse] in pulse() }).value != baseline { reacted = true; break }
+        }
+        if reacted { try? await Task.sleep(for: .milliseconds(150)) }
+        if logTransitions {
+            let elapsed = clock.now - started
+            let ms = Int(elapsed.components.seconds * 1000) + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+            MeasurementLogFile.appendJSONLine(["kind": "reaction", "time": Date().timeIntervalSince1970, "after": action,
+                                               "ms": ms, "early": reacted, "check": "pulse"], toFileNamed: "go-walkthrough.log")
+        }
+        return reacted
+    }
+
     /// Waits until the screen shows the app reacted (a different app, window,
     /// title or control list), or until `cap`.
-    private func waitForReaction(from baseline: Int, cap: Duration, after action: String) async {
+    @discardableResult
+    private func waitForReaction(from baseline: Int, cap: Duration, after action: String) async -> Bool {
         let clock = ContinuousClock()
         let started = clock.now
         var reacted = false
@@ -751,6 +854,7 @@ final class GoWalkthroughCoordinator {
             MeasurementLogFile.appendJSONLine(["kind": "reaction", "time": Date().timeIntervalSince1970, "after": action,
                                                "ms": ms, "early": reacted], toFileNamed: "go-walkthrough.log")
         }
+        return reacted
     }
 
     private func armWatch() {
@@ -768,6 +872,8 @@ final class GoWalkthroughCoordinator {
         guard let observation = try? await readObservation(menus: false, expectedApp: step.app),
               token == generation, !suspended, goalRevision == goals.state.revision else { return }
         if state.observe(observation, now: now()) {
+            // Finished by its expected result appearing: seen working.
+            if let done = state.verifiedSteps.last { pendingCheck = (done, true, false, true) }
             publish()
             if state.phase == .planning { await planNext(generation: token) }
         } else if state.noteOffTrack(observation, now: now()) {
