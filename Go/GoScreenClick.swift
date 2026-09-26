@@ -110,8 +110,10 @@ nonisolated enum GoScreenClick {
         return true
     }
 
-    /// A real click at a global AppKit point; the owner's pointer is put back afterwards.
-    static func click(at point: CGPoint, count: Int) -> Bool {
+    /// A real click at a global AppKit point. With `restoringPointer`, the owner's
+    /// pointer jumps back afterwards; do-it-for-me leaves it where Go clicked,
+    /// under Go's cursor, so it doesn't flick back and forth on every step.
+    static func click(at point: CGPoint, count: Int, restoringPointer: Bool = true) -> Bool {
         let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
         let target = CGPoint(x: point.x, y: primaryHeight - point.y)
         let original = NSEvent.mouseLocation
@@ -127,7 +129,7 @@ nonisolated enum GoScreenClick {
             up.post(tap: .cghidEventTap)
         }
         usleep(60_000)
-        CGWarpMouseCursorPosition(restore)
+        if restoringPointer { CGWarpMouseCursorPosition(restore) }
         return true
     }
 }

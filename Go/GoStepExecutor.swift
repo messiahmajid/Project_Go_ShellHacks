@@ -149,7 +149,7 @@ nonisolated enum GoStepExecutor {
     }
 
     /// Clicks (or double-clicks, to open) the centre of a screenshot-located
-    /// target, then puts the owner's pointer back. Typing steps click to focus,
+    /// target, leaving the pointer there. Typing steps click to focus,
     /// then type through the harness into the focused field.
     private static func performOnScreen(_ step: GoWalkthroughStep, at rect: CGRect,
                                         answer: @escaping @Sendable (String) -> String) async -> Outcome {
@@ -159,7 +159,7 @@ nonisolated enum GoStepExecutor {
         if let refusal = screenTargetRefusal(label: step.screenLabel ?? "", instruction: step.instruction, elementNames: element.names) {
             return .blocked(refusal)
         }
-        guard GoScreenClick.click(at: point, count: step.opens ? 2 : 1) else { return .retryable("I couldn't click there") }
+        guard GoScreenClick.click(at: point, count: step.opens ? 2 : 1, restoringPointer: false) else { return .retryable("I couldn't click there") }
         guard let text = step.typeText else { return .done }
         try? await Task.sleep(for: .milliseconds(250))
         let typed = GoWalkthroughStep(instruction: step.instruction, app: GoActiveApp.bundleIdentifier ?? step.app,
@@ -175,7 +175,7 @@ nonisolated enum GoStepExecutor {
         guard let rect = await GoGuidePresenter.resolve(step, answer: answer) else { return nil }
         let point = CGPoint(x: rect.midX, y: rect.midY)
         if GoScreenClick.describeElement(at: point).isSecure { return .blocked("that's a password field") }
-        return GoScreenClick.click(at: point, count: 1) ? .done : nil
+        return GoScreenClick.click(at: point, count: 1, restoringPointer: false) ? .done : nil
     }
 
     private static func withField(_ line: String, _ key: String, _ value: Any) -> String? {

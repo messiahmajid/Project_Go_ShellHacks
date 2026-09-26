@@ -19,17 +19,13 @@ struct GoTrustedModeToggle: View {
     @AppStorage(GoTrustedMode.defaultsKey) private var trusted = false
 
     var body: some View {
-        Toggle(isOn: $trusted) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Trusted mode").font(.system(size: 12, weight: .semibold))
-                Text("Go acts without asking, except deleting and similar. Passwords, erasing and purchases are always blocked.")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .toggleStyle(.switch)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        GoPanelSwitchRow(
+            icon: "checkmark.shield.fill",
+            tint: Color(hex: "#8E7CF0"),
+            title: "Trusted mode",
+            subtitle: "Go acts without asking, except deleting and similar. Passwords, erasing and purchases are always blocked.",
+            isOn: $trusted
+        )
     }
 }
 

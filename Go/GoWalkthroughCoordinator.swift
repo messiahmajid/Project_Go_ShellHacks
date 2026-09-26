@@ -572,7 +572,10 @@ final class GoWalkthroughCoordinator {
     /// Performs every remaining step: show it, act through the harness, wait for
     /// the UI, plan the next step. A failed step is re-planned once; a second
     /// failure or a safety refusal hands the step to the owner.
-    func runForMe(perform: @escaping @MainActor (GoWalkthroughStep) async -> GoStepExecutor.Outcome) async {
+    /// `pointerSettled` returns once the pointer has landed on the step's target,
+    /// so every action happens where the owner is looking.
+    func runForMe(perform: @escaping @MainActor (GoWalkthroughStep) async -> GoStepExecutor.Outcome,
+                  pointerSettled: @escaping @MainActor () async -> Void = { try? await Task.sleep(for: .milliseconds(250)) }) async {
         guard goals.activeGoal != nil else { return }
         if goalRevision != goals.state.revision || state.phase == .stopped || state.phase == .idle {
             // A new or restarted task begins from the current screen.
@@ -588,7 +591,7 @@ final class GoWalkthroughCoordinator {
         while autopilot, !Task.isCancelled, state.phase == .waiting, let step = state.step {
             let token = generation
             // Let the pointer land so the owner sees what Go is about to do.
-            try? await Task.sleep(for: .milliseconds(250))
+            await pointerSettled()
             guard autopilot, token == generation, state.step == step else { break }
             // "confirm" steps wait for the owner's yes, unless the kernel will show its
             // own card for this target anyway (never ask twice).

@@ -108,6 +108,22 @@ struct GoAutopilotTests {
         #expect(!coordinator.autopilot)
     }
 
+    @Test func everyActionWaitsForThePointerToLandFirst() async {
+        let app = App()
+        var events: [String] = []
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            context.verifiedSteps.count < 2
+                ? GoStepProposal(kind: .step, instruction: "Click Open.", targetID: context.verifiedSteps.isEmpty ? "c0" : "c1", expected: nil)
+                : GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe(perform: { step in
+            events.append("act")
+            return await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
+        }, pointerSettled: { events.append("landed") })
+        #expect(events == ["landed", "act", "landed", "act"])
+        #expect(coordinator.state.phase == .done)
+    }
+
     @Test func aFailedStepIsRetriedOnceThenHandedBack() async {
         let app = App()
         var attempts = 0

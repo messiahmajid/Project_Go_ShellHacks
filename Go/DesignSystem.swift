@@ -20,13 +20,13 @@ enum DS {
         static let textPrimary = Color(hex: "#ECEEED")
         static let textSecondary = Color(hex: "#ADB5B2")
         static let textTertiary = Color(hex: "#6B736F")
-        /// White on the blue accent is about 5:1 contrast (WCAG AA).
-        static let textOnAccent: Color = .white
+        /// Near-black on the green accent (about 8:1 contrast); white would be 2.6:1.
+        static let textOnAccent = Color(hex: "#0B1A0A")
         static let codeText = Color(hex: "#9DC2FF")
 
         // Accent
         static let blue400 = Color(hex: "#60a5fa")
-        static let accent = Color(hex: "#2563eb")
+        static let accent = Color(hex: "#5BB450")
 
         // Status
         static let destructive = Color(hex: "#E5484D")
@@ -35,8 +35,8 @@ enum DS {
         static let success = Color(hex: "#34D399")
         static let warning = Color(hex: "#FFB224")
 
-        /// The blue cursor and its bubbles.
-        static let overlayCursorBlue = Color(hex: "#3380FF")
+        /// The cursor, its bubbles and the highlight box.
+        static let overlayCursor = Color(hex: "#5BB450")
     }
 
     enum Spacing {

@@ -13,6 +13,8 @@ struct GoPanelView: View {
     @ObservedObject var goController: GoController
     @ObservedObject var confirmations: HarnessConfirmations
 
+    private var isReady: Bool { goController.hasCompletedOnboarding && goController.allPermissionsGranted }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Harness confirmations first: a pending question is the one thing
@@ -20,466 +22,311 @@ struct GoPanelView: View {
             ConfirmationPromptView(confirmations: confirmations)
             // Only here, not on the floating card: revoking is a panel chore.
             AlwaysRulesListView(confirmations: confirmations)
-            GoTrustedModeToggle()
 
-            panelHeader
-            Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.horizontal, 16)
+            VStack(alignment: .leading, spacing: 10) {
+                panelHeader
 
-            permissionsCopySection
-                .padding(.top, 16)
-                .padding(.horizontal, 16)
+                if isReady {
+                    talkCard
+                } else {
+                    introCopy
+                }
 
-            if goController.hasCompletedOnboarding && goController.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 12)
+                if !goController.allPermissionsGranted {
+                    permissionsCard
+                }
 
-                modelPickerRow
-                    .padding(.horizontal, 16)
+                settingsCard
+
+                if !goController.hasCompletedOnboarding && goController.allPermissionsGranted {
+                    Button("Start") { goController.triggerOnboarding() }
+                        .buttonStyle(GoPillButtonStyle(fullWidth: true))
+                        .pointerCursor()
+                }
+
+                footerSection
             }
-
-            if !goController.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 16)
-
-                settingsSection
-                    .padding(.horizontal, 16)
-            }
-
-            if !goController.hasCompletedOnboarding && goController.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 16)
-
-                startButton
-                    .padding(.horizontal, 16)
-            }
-
-            Spacer()
-                .frame(height: 12)
-
-            Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.horizontal, 16)
-
-            footerSection
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+            .padding(GoPanelMetrics.inset)
         }
         .frame(width: 320)
         .background(panelBackground)
+        .environment(\.colorScheme, .dark)
     }
 
     // MARK: - Header
 
     private var panelHeader: some View {
-        HStack {
-            HStack(spacing: 8) {
-                // Animated status dot
-                Circle()
-                    .fill(statusDotColor)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: statusDotColor.opacity(0.6), radius: 4)
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(DS.Colors.accent.gradient)
+                .frame(width: 30, height: 30)
+                .overlay(
+                    Image(systemName: "location.north.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .rotationEffect(.degrees(-35))
+                        .foregroundStyle(DS.Colors.textOnAccent)
+                )
 
+            VStack(alignment: .leading, spacing: 1) {
                 Text("Go")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(DS.Colors.textPrimary)
+                HStack(spacing: 5) {
+                    statusDot
+                    Text(statusText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(DS.Colors.textSecondary)
+                }
             }
 
             Spacer()
-
-            Text(statusText)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
 
             Button(action: {
                 NotificationCenter.default.post(name: .goDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(DS.Colors.textSecondary)
                     .frame(width: 20, height: 20)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.08))
-                    )
+                    .background(Circle().fill(Color.white.opacity(0.1)))
             }
             .buttonStyle(.plain)
             .pointerCursor()
+            .accessibilityLabel("Close")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 2)
     }
-
-    // MARK: - Permissions Copy
 
     @ViewBuilder
-    private var permissionsCopySection: some View {
-        if goController.hasCompletedOnboarding && goController.allPermissionsGranted {
-            Text("Hold Control+Option to talk.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else if goController.allPermissionsGranted {
-            Text("You're all set. Hit Start to meet Go.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else if goController.hasCompletedOnboarding {
-            // Permissions were revoked after onboarding — tell user to re-grant
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Permissions needed")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Text("Some permissions were revoked. Grant all four below to keep using Go.")
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private var statusDot: some View {
+        let dot = Circle()
+            .fill(statusDotColor)
+            .frame(width: 6, height: 6)
+            .shadow(color: statusDotColor.opacity(0.7), radius: 3)
+        if isBusy {
+            // A slow breathe while Go listens or thinks.
+            dot.phaseAnimator([1.0, 0.35]) { view, opacity in
+                view.opacity(opacity)
+            } animation: { _ in .easeInOut(duration: 0.8) }
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Meet Go.")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Text("Get step-by-step help with software on your Mac.")
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Allow microphone, Accessibility, and screen access to use voice and screen assistance.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Color(red: 0.9, green: 0.4, blue: 0.4))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            dot
         }
     }
 
-    // MARK: - Start Button
+    // MARK: - Talk hint
 
-    private var startButton: some View {
-        Button(action: { goController.triggerOnboarding() }) {
-            Text("Start")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(DS.Colors.textOnAccent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                        .fill(DS.Colors.accent)
-                )
+    private var talkCard: some View {
+        GoPanelCard {
+            HStack(spacing: 6) {
+                Text("Hold")
+                GoKeyCap(symbol: "⌃", name: "control")
+                GoKeyCap(symbol: "⌥", name: "option")
+                Text("and talk")
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(DS.Colors.textSecondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
+    }
+
+    // MARK: - Intro copy
+
+    @ViewBuilder
+    private var introCopy: some View {
+        if goController.allPermissionsGranted {
+            Text("You're all set. Hit Start to meet Go.")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DS.Colors.textSecondary)
+                .padding(.horizontal, 2)
+        } else if goController.hasCompletedOnboarding {
+            // Permissions were revoked after onboarding — tell user to re-grant
+            introText(
+                title: "Permissions needed",
+                body: "Some permissions were revoked. Grant all four below to keep using Go."
+            )
+        } else {
+            introText(
+                title: "Meet Go.",
+                body: "Get step-by-step help with software on your Mac. Allow microphone, Accessibility, and screen access to use voice and screen assistance."
+            )
+        }
+    }
+
+    private func introText(title: String, body: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(DS.Colors.textPrimary)
+            Text(body)
+                .font(.system(size: 11))
+                .foregroundStyle(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 2)
     }
 
     // MARK: - Permissions
 
-    private var settingsSection: some View {
-        VStack(spacing: 2) {
-            Text("PERMISSIONS")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundColor(DS.Colors.textTertiary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 6)
-
-            microphonePermissionRow
-
-            accessibilityPermissionRow
-
-            screenRecordingPermissionRow
-
-            if goController.hasScreenRecordingPermission {
-                screenContentPermissionRow
+    private var permissionsCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Permissions")
+            GoPanelCard {
+                microphonePermissionRow
+                GoPanelRowDivider()
+                accessibilityPermissionRow
+                GoPanelRowDivider()
+                screenRecordingPermissionRow
+                if goController.hasScreenRecordingPermission {
+                    GoPanelRowDivider()
+                    screenContentPermissionRow
+                }
             }
+        }
+    }
 
+    private func permissionRow<Grant: View>(
+        icon: String,
+        title: String,
+        subtitle: String? = nil,
+        isGranted: Bool,
+        @ViewBuilder grant: () -> Grant
+    ) -> some View {
+        GoPanelRow(
+            icon: icon,
+            tint: isGranted ? DS.Colors.accent : DS.Colors.warning,
+            title: title,
+            subtitle: subtitle
+        ) {
+            if isGranted {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(DS.Colors.accent)
+                    .accessibilityLabel("Granted")
+            } else {
+                grant()
+            }
+        }
+    }
+
+    private func grantButton(_ action: @escaping () -> Void) -> some View {
+        Button("Grant", action: action)
+            .buttonStyle(GoPillButtonStyle())
+            .pointerCursor()
+    }
+
+    private var microphonePermissionRow: some View {
+        permissionRow(icon: "mic.fill", title: "Microphone", isGranted: goController.hasMicrophonePermission) {
+            grantButton {
+                // Triggers the native macOS microphone permission dialog on
+                // first attempt. If already denied, opens System Settings.
+                let status = AVCaptureDevice.authorizationStatus(for: .audio)
+                if status == .notDetermined {
+                    AVCaptureDevice.requestAccess(for: .audio) { _ in }
+                } else {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
         }
     }
 
     private var accessibilityPermissionRow: some View {
-        let isGranted = goController.hasAccessibilityPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "hand.raised")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                Text("Accessibility")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+        permissionRow(icon: "hand.raised.fill", title: "Accessibility", isGranted: goController.hasAccessibilityPermission) {
+            HStack(spacing: 6) {
+                Button("Find App") {
+                    // Reveals the app in Finder so the user can drag it into
+                    // the Accessibility list if it doesn't appear automatically
+                    // (common with unsigned dev builds).
+                    WindowPositionManager.revealAppInFinder()
+                    WindowPositionManager.openAccessibilitySettings()
                 }
-            } else {
-                HStack(spacing: 6) {
-                    Button(action: {
-                        // Triggers the system accessibility prompt (AXIsProcessTrustedWithOptions)
-                        // on first attempt, then opens System Settings on subsequent attempts.
-                        WindowPositionManager.requestAccessibilityPermission()
-                    }) {
-                        Text("Grant")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textOnAccent)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .fill(DS.Colors.accent)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                .buttonStyle(GoPillButtonStyle(prominent: false))
+                .pointerCursor()
 
-                    Button(action: {
-                        // Reveals the app in Finder so the user can drag it into
-                        // the Accessibility list if it doesn't appear automatically
-                        // (common with unsigned dev builds).
-                        WindowPositionManager.revealAppInFinder()
-                        WindowPositionManager.openAccessibilitySettings()
-                    }) {
-                        Text("Find App")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textSecondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                grantButton {
+                    // Triggers the system accessibility prompt (AXIsProcessTrustedWithOptions)
+                    // on first attempt, then opens System Settings on subsequent attempts.
+                    WindowPositionManager.requestAccessibilityPermission()
                 }
             }
         }
-        .padding(.vertical, 6)
     }
 
     private var screenRecordingPermissionRow: some View {
         let isGranted = goController.hasScreenRecordingPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "rectangle.dashed.badge.record")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Screen Recording")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-
-                    Text(isGranted
-                         ? "Only takes a screenshot when you use the hotkey"
-                         : "Quit and reopen after granting")
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                }
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                Button(action: {
-                    // Triggers the native macOS screen recording prompt on first
-                    // attempt (auto-adds app to the list), then opens System Settings
-                    // on subsequent attempts.
-                    WindowPositionManager.requestScreenRecordingPermission()
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
+        return permissionRow(
+            icon: "rectangle.dashed.badge.record",
+            title: "Screen Recording",
+            subtitle: isGranted ? "Only takes a screenshot when you use the hotkey" : "Quit and reopen after granting",
+            isGranted: isGranted
+        ) {
+            grantButton {
+                // Triggers the native macOS screen recording prompt on first
+                // attempt (auto-adds app to the list), then opens System Settings
+                // on subsequent attempts.
+                WindowPositionManager.requestScreenRecordingPermission()
             }
         }
-        .padding(.vertical, 6)
     }
 
     private var screenContentPermissionRow: some View {
-        let isGranted = goController.hasScreenContentPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "eye")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                Text("Screen Content")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                Button(action: {
-                    goController.requestScreenContentPermission()
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-            }
+        permissionRow(icon: "eye.fill", title: "Screen Content", isGranted: goController.hasScreenContentPermission) {
+            grantButton { goController.requestScreenContentPermission() }
         }
-        .padding(.vertical, 6)
     }
 
-    private var microphonePermissionRow: some View {
-        let isGranted = goController.hasMicrophonePermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "mic")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
+    // MARK: - Settings
 
-                Text("Microphone")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+    private var settingsCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Settings")
+            GoPanelCard {
+                if isReady {
+                    GoPanelSwitchRow(
+                        icon: "cursorarrow.rays",
+                        title: "Show Go cursor",
+                        subtitle: "Off: it appears only while you talk.",
+                        isOn: Binding(
+                            get: { goController.isGoCursorEnabled },
+                            set: { goController.setGoCursorEnabled($0) }
+                        )
+                    )
+                    GoPanelRowDivider()
                 }
-            } else {
-                Button(action: {
-                    // Triggers the native macOS microphone permission dialog on
-                    // first attempt. If already denied, opens System Settings.
-                    let status = AVCaptureDevice.authorizationStatus(for: .audio)
-                    if status == .notDetermined {
-                        AVCaptureDevice.requestAccess(for: .audio) { _ in }
-                    } else {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                            NSWorkspace.shared.open(url)
-                        }
+                GoTrustedModeToggle()
+                if isReady {
+                    GoPanelRowDivider()
+                    GoPanelRow(icon: "waveform", tint: Color(hex: "#E8793A"), title: "Voice") {
+                        Text("Gemini + ElevenLabs")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(DS.Colors.textTertiary)
                     }
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
             }
         }
-        .padding(.vertical, 6)
     }
 
-    // MARK: - Show Go Cursor Toggle
-
-    // MARK: - Model Picker
-
-    private var modelPickerRow: some View {
-        HStack {
-            Text("Voice")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-
-            Spacer()
-
-            Text("Gemini + ElevenLabs")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
-        }
-        .padding(.vertical, 4)
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(DS.Colors.textTertiary)
+            .padding(.horizontal, 4)
     }
 
     // MARK: - Footer
 
     private var footerSection: some View {
-        HStack {
-            Button(action: {
-                NSApp.terminate(nil)
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "power")
-                        .font(.system(size: 11, weight: .medium))
-                    Text("Quit Go")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .foregroundColor(DS.Colors.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .pointerCursor()
-
+        VStack(spacing: 0) {
             if goController.hasCompletedOnboarding {
-                Spacer()
-
-                Button(action: {
+                GoMenuRowButton(icon: "play.circle", title: "Show Welcome Again") {
                     goController.replayOnboarding()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.circle")
-                            .font(.system(size: 11, weight: .medium))
-                        Text("Show Welcome Again")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .foregroundColor(DS.Colors.textTertiary)
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+            }
+            GoMenuRowButton(icon: "power", title: "Quit Go") {
+                NSApp.terminate(nil)
             }
         }
     }
@@ -487,10 +334,18 @@ struct GoPanelView: View {
     // MARK: - Visual Helpers
 
     private var panelBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(DS.Colors.background)
-            .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+        let shape = RoundedRectangle(cornerRadius: GoPanelMetrics.cornerRadius, style: .continuous)
+        return ZStack {
+            GoGlassBackground()
+            // A light tint so text stays readable over bright windows.
+            DS.Colors.background.opacity(0.35)
+        }
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
+    }
+
+    private var isBusy: Bool {
+        goController.isOverlayVisible && goController.voiceState != .idle
     }
 
     private var statusDotColor: Color {
@@ -498,10 +353,8 @@ struct GoPanelView: View {
             return DS.Colors.textTertiary
         }
         switch goController.voiceState {
-        case .idle:
-            return DS.Colors.success
-        case .listening:
-            return DS.Colors.blue400
+        case .idle, .listening:
+            return DS.Colors.accent
         case .processing, .responding:
             return DS.Colors.blue400
         }

@@ -84,7 +84,7 @@ nonisolated enum CursorNavigationMode {
     case pointingAtTarget
 }
 
-// The blue cursor for one screen. It shows only while the mouse is on this
+// Go's cursor for one screen. It shows only while the mouse is on this
 // screen, and turns into a waveform (listening) or spinner (processing).
 struct BlueCursorView: View {
     let screenFrame: CGRect
@@ -127,6 +127,9 @@ struct BlueCursorView: View {
     /// Where the mouse was when navigation started, to detect the user moving it.
     @State private var cursorPositionWhenNavigationStarted: CGPoint = .zero
 
+    /// The screen point being flown to, reported to the controller on landing.
+    @State private var navigationTargetScreenLocation: CGPoint?
+
     /// Drives the frame-by-frame flight.
     @State private var navigationAnimationTimer: Timer?
 
@@ -164,8 +167,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(DS.Colors.overlayCursor)
+                            .shadow(color: DS.Colors.overlayCursor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .fixedSize()
                     .overlay(
@@ -192,8 +195,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(DS.Colors.overlayCursor)
+                            .shadow(color: DS.Colors.overlayCursor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .fixedSize()
                     .overlay(
@@ -226,8 +229,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(DS.Colors.overlayCursor)
+                            .shadow(color: DS.Colors.overlayCursor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .position(guideBubbleCenter(textSize: textSize))
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
@@ -246,9 +249,9 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
+                            .fill(DS.Colors.overlayCursor)
                             .shadow(
-                                color: DS.Colors.overlayCursorBlue.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
+                                color: DS.Colors.overlayCursor.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
                                 radius: 6 + (1.0 - navigationBubbleScale) * 16,
                                 x: 0, y: 0
                             )
@@ -275,10 +278,10 @@ struct BlueCursorView: View {
             // so nothing pops. While navigating, the flight timer sets the position
             // directly, so there is no implicit animation.
             Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
+                .fill(DS.Colors.overlayCursor)
                 .frame(width: 16, height: 16)
                 .rotationEffect(.degrees(triangleRotationDegrees))
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (cursorFlightScale - 1.0) * 20, x: 0, y: 0)
+                .shadow(color: DS.Colors.overlayCursor, radius: 8 + (cursorFlightScale - 1.0) * 20, x: 0, y: 0)
                 .scaleEffect(cursorFlightScale)
                 .opacity(cursorIsVisibleOnThisScreen && (goController.voiceState == .idle || goController.voiceState == .responding) ? cursorOpacity : 0)
                 .position(cursorPosition)
@@ -337,7 +340,11 @@ struct BlueCursorView: View {
         }
         .onChange(of: goController.detectedElementScreenLocation) { _, newLocation in
             if newLocation == nil {
-                if cursorNavigationMode != .followingCursor { cancelNavigationAndResumeFollowing() }
+                guard cursorNavigationMode != .followingCursor else { return }
+                // While Go acts on its own, the pointer waits where it last acted
+                // and flies on from there; returning to the mouse between steps
+                // made it bounce back and forth.
+                if goController.isGoDriving { parkAtCurrentPosition() } else { cancelNavigationAndResumeFollowing() }
                 return
             }
             // Fly to a newly detected target.
@@ -346,13 +353,25 @@ struct BlueCursorView: View {
                 return
             }
 
-            // Only if the target is on this screen.
+            // Only if the target is on this screen; a pointer left on this screen
+            // gives way to the one flying on the other.
             guard screenFrame.contains(CGPoint(x: displayFrame.midX, y: displayFrame.midY))
                   || displayFrame == screenFrame else {
+                if cursorNavigationMode != .followingCursor { resetToFollowing() }
                 return
             }
 
             startNavigatingToElement(screenLocation: screenLocation)
+        }
+        .onChange(of: goController.isGoDriving) { _, driving in
+            // Go finished acting: the pointer goes back to the owner's mouse,
+            // after the usual pause if it is still showing a target.
+            guard !driving, cursorNavigationMode == .pointingAtTarget else { return }
+            if goController.detectedElementScreenLocation == nil {
+                startFlyingBackToCursor()
+            } else {
+                scheduleReturnToCursor()
+            }
         }
     }
 
@@ -455,6 +474,8 @@ struct BlueCursorView: View {
 
         cursorNavigationMode = .navigatingToTarget
         isReturningToCursor = false
+        navigationTargetScreenLocation = screenLocation
+        goController.pointerLandedAt = nil
 
         animateBezierFlightArc(to: clampedTarget) {
             guard self.cursorNavigationMode == .navigatingToTarget else { return }
@@ -534,6 +555,7 @@ struct BlueCursorView: View {
     /// Shows the pointing bubble, typing the text out.
     private func startPointingAtElement() {
         cursorNavigationMode = .pointingAtTarget
+        goController.pointerLandedAt = navigationTargetScreenLocation
 
         triangleRotationDegrees = -35.0
 
@@ -548,16 +570,43 @@ struct BlueCursorView: View {
             ?? "right here!"
 
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
-            // Hold for 3 seconds, then fly back.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                guard self.cursorNavigationMode == .pointingAtTarget else { return }
-                self.navigationBubbleOpacity = 0.0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard self.cursorNavigationMode == .pointingAtTarget else { return }
-                    self.startFlyingBackToCursor()
-                }
+            // While Go acts on its own, the pointer stays for the next step.
+            guard !self.goController.isGoDriving else { return }
+            self.scheduleReturnToCursor()
+        }
+    }
+
+    /// Holds on the target for 3 seconds, then flies back to the mouse.
+    private func scheduleReturnToCursor() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            guard self.cursorNavigationMode == .pointingAtTarget, !self.goController.isGoDriving else { return }
+            self.navigationBubbleOpacity = 0.0
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard self.cursorNavigationMode == .pointingAtTarget, !self.goController.isGoDriving else { return }
+                self.startFlyingBackToCursor()
             }
         }
+    }
+
+    /// Stops wherever the pointer is (mid-flight or on a target) and waits there
+    /// for the next target, without following the mouse.
+    private func parkAtCurrentPosition() {
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        cursorNavigationMode = .pointingAtTarget
+        isReturningToCursor = false
+        triangleRotationDegrees = -35.0
+        cursorFlightScale = 1.0
+        navigationBubbleText = ""
+        navigationBubbleOpacity = 0.0
+        navigationBubbleScale = 1.0
+    }
+
+    /// Back to following the mouse on this screen, leaving the controller's
+    /// target alone (it belongs to another screen now).
+    private func resetToFollowing() {
+        parkAtCurrentPosition()
+        cursorNavigationMode = .followingCursor
     }
 
     /// Types the bubble out one character at a time (30-60 ms each).
@@ -670,7 +719,7 @@ private struct BlueCursorWaveformView: View {
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<barCount, id: \.self) { barIndex in
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
+                        .fill(DS.Colors.overlayCursor)
                         .frame(
                             width: 2,
                             height: barHeight(
@@ -680,7 +729,7 @@ private struct BlueCursorWaveformView: View {
                         )
                 }
             }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: DS.Colors.overlayCursor.opacity(0.6), radius: 6, x: 0, y: 0)
             .animation(.linear(duration: 0.08), value: audioPowerLevel)
         }
     }
@@ -707,8 +756,8 @@ private struct BlueCursorSpinnerView: View {
             .stroke(
                 AngularGradient(
                     colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
+                        DS.Colors.overlayCursor.opacity(0.0),
+                        DS.Colors.overlayCursor
                     ],
                     center: .center
                 ),
@@ -716,7 +765,7 @@ private struct BlueCursorSpinnerView: View {
             )
             .frame(width: 14, height: 14)
             .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: DS.Colors.overlayCursor.opacity(0.6), radius: 6, x: 0, y: 0)
             .onAppear {
                 withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
                     isSpinning = true
@@ -825,7 +874,7 @@ private struct ElementHighlightView: View {
         let top = screenFrame.height - (rect.maxY - screenFrame.origin.y)
         ZStack(alignment: .topLeading) {
             Rectangle()
-                .stroke(Color.cyan, lineWidth: 3)
+                .stroke(DS.Colors.overlayCursor, lineWidth: 3)
                 .frame(width: rect.width, height: rect.height)
                 .position(x: rect.midX - screenFrame.origin.x, y: top + rect.height / 2)
             if let label {
@@ -834,7 +883,7 @@ private struct ElementHighlightView: View {
                     .foregroundColor(.black)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.cyan)
+                    .background(DS.Colors.overlayCursor)
                     .fixedSize()
                     .position(x: rect.midX - screenFrame.origin.x, y: max(top - 12, 12))
             }

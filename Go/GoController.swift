@@ -3,7 +3,7 @@
 //  Go
 //
 //  Go's app-wide state: permissions, onboarding, the push-to-talk shortcut,
-//  the blue cursor overlay and the voice session. The panel and the overlay
+//  the cursor overlay and the voice session. The panel and the overlay
 //  observe it.
 //
 
@@ -36,6 +36,11 @@ final class GoController: ObservableObject {
     @Published var detectedElementDisplayFrame: CGRect?
     /// Bubble text for the pointing animation.
     @Published var detectedElementBubbleText: String?
+    /// Go is acting on its own (do it for me, routine replay). The pointer then
+    /// stays where it last acted between steps instead of returning to the mouse.
+    @Published private(set) var isGoDriving = false
+    /// The target the pointer last landed on, set by the overlay.
+    var pointerLandedAt: CGPoint?
     /// The current walkthrough instruction, beside the cursor while it follows
     /// the mouse.
     @Published var guideBubbleText: String?
@@ -122,6 +127,12 @@ final class GoController: ObservableObject {
                 self.guideHighlightIsVisible = true
             }
         }
+        realtimeVoiceSession?.onAutopilotChanged = { [weak self] driving in
+            self?.isGoDriving = driving
+        }
+        realtimeVoiceSession?.onAwaitPointer = { [weak self] in
+            await self?.waitForPointerToLand()
+        }
         realtimeVoiceSession?.prewarm()
 
         // Show the cursor at once if onboarding is done and permissions still hold.
@@ -150,6 +161,43 @@ final class GoController: ObservableObject {
         overlayWindowManager.hasShownOverlayBefore = false
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, goController: self)
         isOverlayVisible = true
+    }
+
+    /// Waits until the pointer has landed on the current target, so an action
+    /// never happens before the owner can see where. Returns early when the
+    /// cursor is hidden or the step has nothing to point at (a keyboard step).
+    func waitForPointerToLand() async {
+        let clock = ContinuousClock()
+        let started = clock.now
+        while isOverlayVisible, clock.now - started < .milliseconds(1800), !Task.isCancelled {
+            if let target = detectedElementScreenLocation {
+                if pointerLandedAt == target {
+                    // A short beat on the target before acting.
+                    try? await Task.sleep(for: .milliseconds(150))
+                    return
+                }
+            } else if clock.now - started > .milliseconds(700) {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+    }
+
+    /// The panel's "Show Go cursor" switch. Off lets the cursor finish what it is
+    /// saying or pointing at, then fade; push-to-talk still brings it back.
+    func setGoCursorEnabled(_ enabled: Bool) {
+        isGoCursorEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isGoCursorEnabled")
+        if enabled {
+            transientHideTask?.cancel()
+            transientHideTask = nil
+            guard hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible else { return }
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, goController: self)
+            isOverlayVisible = true
+        } else {
+            scheduleTransientHideIfNeeded()
+        }
     }
 
     func clearDetectedElementLocation() {

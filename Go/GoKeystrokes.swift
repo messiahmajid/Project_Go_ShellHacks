@@ -116,7 +116,7 @@ nonisolated struct GoKeyCombo: Equatable, Sendable {
     }
 }
 
-extension GoKeystrokes {
+nonisolated extension GoKeystrokes {
     /// Terminal apps, where typed text runs as a command and gets the command screening.
     static func isTerminal(_ bundleIdentifier: String) -> Bool {
         let known: Set<String> = ["com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "co.zeit.hyper",

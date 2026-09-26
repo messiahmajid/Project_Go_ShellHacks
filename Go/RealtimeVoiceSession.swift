@@ -59,6 +59,10 @@ final class RealtimeVoiceSession {
     var onGuideText: ((String?) -> Void)?
     var onGuidePoint: ((CGRect?, String) -> Void)?
     var onGuideHighlight: ((CGRect?) -> Void)?
+    /// Go is acting on its own (do it for me, routine replay): true at the start, false at the end.
+    var onAutopilotChanged: ((Bool) -> Void)?
+    /// Returns once the pointer has landed on the current step's target.
+    var onAwaitPointer: (() async -> Void)?
     private lazy var guide = GoGuidePresenter(
         resolve: { [weak self] step in
             guard let self else { return nil }
@@ -479,12 +483,16 @@ final class RealtimeVoiceSession {
         let answer = harnessAnswer
         Task { [weak self] in
             guard let self else { return }
-            await self.walkthrough.runForMe { [weak self] step in
+            self.onAutopilotChanged?(true)
+            await self.walkthrough.runForMe(perform: { [weak self] step in
                 await GoStepExecutor.perform(step, answer: answer) { [weak self] in
                     self?.onGuideText?("Please confirm in the Go panel.")
                     Task { try? await self?.speechClient.speakText("Please confirm that in the Go panel.") }
                 }
-            }
+            }, pointerSettled: { [weak self] in
+                await self?.onAwaitPointer?()
+            })
+            self.onAutopilotChanged?(false)
         }
     }
 
