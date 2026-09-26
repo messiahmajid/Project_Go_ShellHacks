@@ -1,4 +1,4 @@
-# Go 👉
+# Go!
 
 A tiny helper that lives in your Mac's menu bar and shows you how to do stuff by actually pointing at it.
 
