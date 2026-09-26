@@ -217,6 +217,12 @@ final class GoWalkthroughCoordinator {
         Array(steps.dropLast(shownInFull).suffix(42)).map { String($0.instruction.prefix(240)) }
     }
 
+    /// A step on a control that opens something (a menu button, pop-up, combo box
+    /// or disclosure): its result often isn't in the Accessibility lists.
+    nonisolated static func opensSomething(_ step: GoWalkthroughStep) -> Bool {
+        ["AXMenuButton", "AXPopUpButton", "AXComboBox", "AXDisclosureTriangle"].contains(step.control?.role ?? "")
+    }
+
     /// Keeps a new planner note: trimmed, at most 280 characters, not a repeat,
     /// and only the latest 10.
     nonisolated static func addingNote(_ note: String?, to notes: [String]) -> [String] {
@@ -485,8 +491,13 @@ final class GoWalkthroughCoordinator {
             let sparse = catalog.controls.count < 20 || (catalog.menus.isEmpty && catalog.controls.count < 40)
             // After a reveal (a scroll), what is now visible is the whole question.
             let afterReveal = state.verifiedSteps.last?.reveal == true
+            // What a menu button, pop-up or disclosure opened (a dropdown, gallery,
+            // panel) is often outside the lists: the next plan needs to see it.
+            let afterOpener = state.verifiedSteps.last.map(Self.opensSomething) ?? false
             // A partial read (a very large interface) leans on the screenshot too.
-            if sparse || afterReveal || !observation.complete || visualApps.contains(observation.app) { context.screenshotJPEG = shot?.jpeg }
+            if sparse || afterReveal || afterOpener || !observation.complete || visualApps.contains(observation.app) {
+                context.screenshotJPEG = shot?.jpeg
+            }
             context.recent = recent.map(\.line)
             // A replaying routine's step that is on this screen needs no planner.
             let replay = routineStep(in: observation)
@@ -507,8 +518,10 @@ final class GoWalkthroughCoordinator {
                 // Answers, reveals and app launches are claims about the screen, so the
                 // screenshot plan decides them.
                 // A screenshot box from the plan that never saw the screen is a guess.
+                // So is "the last step didn't work": judged blind, it sends the owner
+                // down another route after a step that did work.
                 if proposal.needScreen == true || proposal.kind == .answer || proposal.kind == .reveal || proposal.kind == .launch
-                    || proposal.targetID == "screen" {
+                    || proposal.targetID == "screen" || proposal.lastStep == "notYet" {
                     proposal = try await visionPlan.value
                     context.screenshotJPEG = shot?.jpeg
                 } else {

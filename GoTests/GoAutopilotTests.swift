@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 @testable import Go
@@ -215,6 +216,39 @@ struct GoAutopilotTests {
         #expect(kept.count == 6)
         #expect(kept.first == "a")
         #expect(kept[1].count == 140)
+    }
+
+    @Test func aBlindNotYetIsCheckedAgainstTheScreenshot() async throws {
+        let app = App()
+        var shownScreenshot: [Bool] = []
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            shownScreenshot.append(context.screenshotJPEG != nil)
+            if context.verifiedSteps.isEmpty { return GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil) }
+            // Without the screen, the plan thinks the click failed and goes another way;
+            // with it, the plan sees the click worked and carries on.
+            var next = GoStepProposal(kind: .step, instruction: context.screenshotJPEG == nil ? "Use the menu instead." : "Click Continue.",
+                                      targetID: context.screenshotJPEG == nil ? "c0" : "c1", expected: nil)
+            next.lastStep = context.screenshotJPEG == nil ? "notYet" : "worked"
+            return next
+        }, capture: { ("/9j/", GoFrame(CGRect(x: 0, y: 0, width: 100, height: 100))) },
+           frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        _ = await coordinator.start()
+        let step = try #require(coordinator.state.step)
+        _ = app.answer(#"{"verb":"press","title":"Open"}"#)      // the owner's click opens "Continue"
+        await coordinator.targetClicked(step)
+        #expect(coordinator.state.step?.control?.name == "Continue")
+        #expect(coordinator.state.message.hasPrefix("Nice."))
+        #expect(shownScreenshot.contains(true))
+    }
+
+    @Test func controlsThatOpenSomethingAreKnown() {
+        func step(_ role: String) -> GoWalkthroughStep {
+            GoWalkthroughStep(instruction: "Click it.", app: "a", windowToken: "w",
+                              control: GoControl(id: "c0", role: role, name: "Table", radioSelection: nil), menu: nil, expected: nil)
+        }
+        #expect(GoWalkthroughCoordinator.opensSomething(step("AXMenuButton")))
+        #expect(GoWalkthroughCoordinator.opensSomething(step("AXPopUpButton")))
+        #expect(!GoWalkthroughCoordinator.opensSomething(step("AXButton")))
     }
 
     @Test func notesKeepOnlyNewLinesAndTheLatestTen() {

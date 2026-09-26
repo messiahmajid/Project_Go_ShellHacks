@@ -82,6 +82,9 @@ final class ElevenLabsTTSClient {
         let body: [String: Any] = [
             "text": GoSpeechText.spoken(text),
             "model_id": "eleven_flash_v2_5",
+            // Go speaks English; left to guess, the model can drift into another
+            // language's sounds on short or unusual lines.
+            "language_code": "en",
             "voice_settings": [
                 "stability": 0.5,
                 "similarity_boost": 0.75

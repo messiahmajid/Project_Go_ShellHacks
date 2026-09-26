@@ -29,11 +29,52 @@ struct GoTrustedModeToggle: View {
     }
 }
 
-/// Text as it should be read aloud: "2:00 PM" → "2 PM", "2:30pm" → "2:30 PM".
-/// Display text is left untouched.
+/// Text as it should be read aloud; the bubble keeps the exact text. Times read
+/// naturally ("2:00 PM" → "2 PM"), shortcut symbols become words ("⌘⇧B" →
+/// "command shift B"), and formulas, code and paths, which a voice turns into
+/// noise, become "the formula shown" or "the text shown".
 nonisolated enum GoSpeechText {
-    static func spoken(_ text: String) -> String {
+    private static let keySymbols: [(String, String)] = [
+        ("⌘", "command "), ("⇧", "shift "), ("⌥", "option "), ("⌃", "control "), ("↩", " return"), ("⏎", " return"),
+        ("⌫", " delete"), ("⌦", " forward delete"), ("⇥", " tab"), ("⎋", " escape"),
+        ("←", " left arrow"), ("→", " right arrow"), ("↑", " up arrow"), ("↓", " down arrow"),
+    ]
+    private static let codeSymbols = Set("=()[]{}<>+*/\\$!;:|^%&#@~_")
+
+    /// Formula, code, a path or a web address: symbols a voice can't say usefully.
+    static func isUnspeakable(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2 else { return false }
+        if trimmed.hasPrefix("=") || trimmed.contains("://") { return true }
+        let symbols = trimmed.filter { codeSymbols.contains($0) }.count
+        return symbols >= 3 || (trimmed.count >= 6 && Double(symbols) / Double(trimmed.count) >= 0.3)
+    }
+
+    private static func replacingUnspeakable(_ text: String, pattern: String) -> String {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return text }
         var result = text
+        for match in expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let whole = Range(match.range, in: result), let inner = Range(match.range(at: 1), in: result) else { continue }
+            let content = String(result[inner])
+            guard isUnspeakable(content) else { continue }
+            result.replaceSubrange(whole, with: content.trimmingCharacters(in: .whitespaces).hasPrefix("=") ? "the formula shown" : "the text shown")
+        }
+        return result
+    }
+
+    static func spoken(_ text: String) -> String {
+        var result = replacingUnspeakable(text, pattern: "\u{201C}([^\u{201D}]*)\u{201D}")
+        result = replacingUnspeakable(result, pattern: "\"([^\"]*)\"")
+        // Shortcut symbols first, so "(⌘⇧S)" reads as words, not as code.
+        for (symbol, words) in keySymbols { result = result.replacingOccurrences(of: symbol, with: words) }
+        // Unquoted runs of symbols (a formula with quotes of its own inside).
+        result = result.split(separator: " ", omittingEmptySubsequences: false).map { word in
+            word.count >= 6 && isUnspeakable(String(word)) ? "the text shown" : String(word)
+        }.joined(separator: " ")
+        result = result.replacingOccurrences(of: "…", with: ".")
+        result = result.replacingOccurrences(of: #" {2,}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\( "#, with: "(", options: .regularExpression)
+            .replacingOccurrences(of: #" \)"#, with: ")", options: .regularExpression)
         // "a.m." / "p.m." → "am" / "pm" first, so a sentence's own full stop is never eaten.
         result = result.replacingOccurrences(of: #"\b([AaPp])\.\s?[Mm]\."#, with: "$1m", options: .regularExpression)
         // 2:00 PM, 2:00pm → 2 PM
