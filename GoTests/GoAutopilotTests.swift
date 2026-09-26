@@ -1,0 +1,273 @@
+import Foundation
+import Testing
+@testable import Go
+
+struct GoStepExecutorTests {
+    private func object(_ line: String?) -> [String: Any]? {
+        line.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+    }
+
+    @Test func eachStepKindBecomesTheMatchingHarnessRequest() {
+        let menu = GoWalkthroughStep(instruction: "Click File > New Folder.", app: "any.app", windowToken: "w", control: nil,
+                                     menu: GoMenuTarget(id: "m1", path: ["File", "New Folder"]), expected: nil)
+        #expect(object(GoStepExecutor.requestLine(for: menu))?["verb"] as? String == "menu")
+        #expect(object(GoStepExecutor.requestLine(for: menu))?["path"] as? [String] == ["File", "New Folder"])
+        #expect(object(GoStepExecutor.requestLine(for: menu))?["expectApp"] as? String == "any.app")
+
+        let button = GoWalkthroughStep(instruction: "Click Share.", app: "any.app", windowToken: "w",
+                                       control: GoControl(id: "c0", role: "AXButton", name: "Share", radioSelection: nil),
+                                       menu: nil, expected: nil)
+        #expect(object(GoStepExecutor.requestLine(for: button))?["verb"] as? String == "press")
+        #expect(object(GoStepExecutor.requestLine(for: button))?["title"] as? String == "Share")
+
+        let row = GoWalkthroughStep(instruction: "Choose Desktop.", app: "any.app", windowToken: "w",
+                                    control: GoControl(id: "c1", role: "AXRow", name: "Desktop", radioSelection: nil),
+                                    menu: nil, expected: nil)
+        #expect(object(GoStepExecutor.requestLine(for: row))?["verb"] as? String == "select")
+
+        let focused = GoTextField(id: "t0", role: "AXTextField", label: "", focused: true, x: 0, y: 0, w: 10, h: 10)
+        let typing = GoWalkthroughStep(instruction: "Type test.", app: "any.app", windowToken: "w", control: nil, menu: nil,
+                                       expected: nil, field: focused, typeText: "test")
+        #expect(object(GoStepExecutor.requestLine(for: typing))?["verb"] as? String == "type")
+        #expect(object(GoStepExecutor.requestLine(for: typing))?["target"] as? String == "focused")
+        #expect(object(GoStepExecutor.requestLine(for: typing))?["text"] as? String == "test")
+
+        // An unnamed, unfocused field has nothing safe to aim at.
+        let unnamed = GoWalkthroughStep(instruction: "Type test.", app: "any.app", windowToken: "w", control: nil, menu: nil,
+                                        expected: nil, field: GoTextField(id: "t1", role: "AXTextField", label: "", focused: false,
+                                                                          x: 0, y: 0, w: 10, h: 10), typeText: "test")
+        #expect(GoStepExecutor.requestLine(for: unnamed) == nil)
+    }
+
+    @Test func safetyAndConsentRefusalsAreFinalWhileMissesAreRetried() {
+        #expect(GoStepExecutor.outcome(from: ["ok": true]) == .done)
+        for code in ["kernelRefused", "killSwitch", "confirmationDenied", "confirmationExpired", "confirmationStale", "guidanceOnly"] {
+            if case .blocked = GoStepExecutor.outcome(from: ["ok": false, "error": code]) {} else { Issue.record("\(code) not blocked") }
+        }
+        for code in ["notFound", "ambiguous", "notVerified", "frontmostChanged"] {
+            if case .retryable = GoStepExecutor.outcome(from: ["ok": false, "error": code]) {} else { Issue.record("\(code) not retryable") }
+        }
+    }
+
+    @Test func takeoverPhrasesAreRecognisedAndNegationsAreNot() {
+        #expect(GoGuidanceIntent.parse("Do it for me") == .doForMe)
+        #expect(GoGuidanceIntent.parse("Can you just do the rest?") == .doForMe)
+        #expect(GoGuidanceIntent.parse("Can you create a folder called test for me?") == .doTaskForMe("create a folder called test"))
+        #expect(GoGuidanceIntent.parse("Please do it for me") == .doForMe)
+        #expect(GoGuidanceIntent.parse("Don't do it for me, show me how") != .doForMe)
+        #expect(GoGuidanceIntent.parse("Show me how to create a folder") == .newTask("create a folder"))
+    }
+}
+
+@MainActor
+struct GoAutopilotTests {
+    /// A fake app: "Open" is always there; "Continue" appears once Go presses Open.
+    private final class App: @unchecked Sendable {
+        private let lock = NSLock()
+        private var opened = false
+        private(set) var actions: [String] = []
+        func answer(_ line: String) -> String {
+            lock.lock(); defer { lock.unlock() }
+            if line.contains("\"menus\"") { return #"{"ok":true,"items":[]}"# }
+            if line.contains("\"press\"") { actions.append(line); opened = true; return #"{"ok":true}"# }
+            let names = opened ? ["Open", "Continue"] : ["Open"]
+            let object: [String: Any] = ["ok": true, "bundleIdentifier": "org.test.any-app",
+                "window": ["name": "Workspace", "token": "one"], "walkStopReasons": [],
+                "focusChangedDuringWalk": false, "incompleteReads": false,
+                "elements": names.map { ["role": "AXButton", "name": $0, "nameIsPlausibleLabel": true] as [String: Any] }]
+            return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        }
+    }
+
+    private func goals() -> GoGoalStore {
+        let store = GoGoalStore(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("goal.json"))
+        _ = store.apply(GoGoalRequest(operation: .set, expectedRevision: 0, sourceQuote: "Open it for me", task: "open it"),
+                        heard: "Open it for me")
+        return store
+    }
+
+    @Test func goActsVerifiesAndPlansUntilDone() async {
+        let app = App()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            plans += 1
+            if context.verifiedSteps.isEmpty {
+                return GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+            }
+            #expect(context.observation.controls.contains { $0.name == "Continue" })
+            return GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe { step in
+            await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
+        }
+        #expect(app.actions.count == 1)
+        #expect(plans == 2)
+        #expect(coordinator.state.phase == .done)
+        #expect(coordinator.state.message == "All done.")
+        #expect(!coordinator.autopilot)
+    }
+
+    @Test func aFailedStepIsRetriedOnceThenHandedBack() async {
+        let app = App()
+        var attempts = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { _ in
+            GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe { _ in attempts += 1; return .retryable("I couldn't find that control") }
+        #expect(attempts == 2)
+        #expect(coordinator.state.phase == .waiting)
+        #expect(coordinator.state.message.hasPrefix("I couldn't do this one"))
+        #expect(!coordinator.autopilot)
+    }
+
+    @Test func aSafetyRefusalStopsImmediately() async {
+        let app = App()
+        var attempts = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { _ in
+            GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe { _ in attempts += 1; return .blocked("my safety check won't let me do that one") }
+        #expect(attempts == 1)
+        #expect(coordinator.state.message.contains("safety check"))
+    }
+}
+
+struct GoPressReturnTests {
+    @Test func returnIsAddedToTheInstructionOnlyWhenThePlannerAsks() {
+        var observation = GoObservation(app: "any.app", windowToken: "w", windowName: "W", complete: true, controls: [])
+        observation.fields = [GoTextField(id: "t0", role: "AXTextField", label: "", focused: true, x: 0, y: 0, w: 10, h: 10)]
+        var state = GoWalkthroughState()
+        state.accept(GoStepProposal(kind: .step, instruction: "Type \"test\" as the name.", targetID: "t0", expected: nil,
+                                    typeText: "test", pressReturn: true), from: observation)
+        #expect(state.step?.pressReturn == true)
+        #expect(state.message.hasSuffix("Then press Return."))
+        state.accept(GoStepProposal(kind: .step, instruction: "Type \"hello\" in the message box.", targetID: "t0", expected: nil,
+                                    typeText: "hello", pressReturn: false), from: observation)
+        #expect(state.step?.pressReturn == false)
+        #expect(!state.message.contains("Return"))
+    }
+}
+
+struct GoOpenAndLaunchTests {
+    private var finder: GoObservation {
+        GoObservation(app: "any.files", windowToken: "w", windowName: "Pictures", complete: true,
+                      controls: [GoControl(id: "c0", role: "AXTextField", name: "FT.jpg", radioSelection: nil)])
+    }
+
+    @Test func filesAndLabelsAreListedButEditableFieldsAndLongTextAreNot() {
+        let object: [String: Any] = ["ok": true, "bundleIdentifier": "any.app", "window": ["name": "W", "token": "1"],
+            "walkStopReasons": [], "focusChangedDuringWalk": false, "incompleteReads": false,
+            "elements": [["role": "AXTextField", "name": "FT.jpg", "nameIsPlausibleLabel": true, "actions": ["AXOpen"]],
+                         ["role": "AXTextField", "name": "what I typed", "nameIsPlausibleLabel": true, "actions": ["AXConfirm"]],
+                         ["role": "AXStaticText", "name": "Downloads", "nameIsPlausibleLabel": true, "actions": ["AXPress"]],
+                         ["role": "AXStaticText", "name": String(repeating: "long paragraph ", count: 6), "nameIsPlausibleLabel": true]]]
+        #expect(GoObservation.decode(object)?.controls.map(\.name) == ["FT.jpg", "Downloads"])
+    }
+
+    @Test func anOpenStepUsesTheOpenVerbAndIsNotFinishedByTheFirstClick() {
+        var state = GoWalkthroughState()
+        state.accept(GoStepProposal(kind: .step, instruction: "Double-click FT.jpg.", targetID: "c0", expected: nil, open: true), from: finder)
+        guard let step = state.step else { Issue.record("no step"); return }
+        #expect(step.opens)
+        #expect(!GoGuidePresenter.completesOnClick(step))
+        let line = GoStepExecutor.requestLine(for: step)
+        #expect(line?.contains("\"open\"") == true)
+        // Opening a folder in the same window changes its title: that completes the step.
+        let opened = GoObservation(app: "any.files", windowToken: "w", windowName: "Holiday", complete: true, controls: [])
+        _ = state.observe(opened, now: 0)
+        let done = state.observe(opened, now: 0.3)
+        #expect(done)
+        // And it is never treated as going off track.
+        var other = GoWalkthroughState()
+        other.accept(GoStepProposal(kind: .step, instruction: "Double-click FT.jpg.", targetID: "c0", expected: nil, open: true), from: finder)
+        _ = other.noteOffTrack(opened, now: 0)
+        let offTrack = other.noteOffTrack(opened, now: 1)
+        #expect(!offTrack)
+    }
+
+    @Test func aLaunchStepNamesTheAppAndUsesTheLaunchVerb() {
+        var state = GoWalkthroughState()
+        state.accept(GoStepProposal(kind: .launch, instruction: "Open Calendar.", targetID: nil, expected: nil, app: "Calendar"), from: finder)
+        #expect(state.phase == .waiting)
+        #expect(state.step?.launchApp == "Calendar")
+        if let step = state.step {
+            #expect(!GoGuidePresenter.completesOnClick(step))
+            #expect(GoStepExecutor.requestLine(for: step)?.contains("\"launch\"") == true)
+        }
+        state.accept(GoStepProposal(kind: .launch, instruction: "Open it.", targetID: nil, expected: nil, app: " "), from: finder)
+        #expect(state.phase == .needsInput)
+    }
+}
+
+@MainActor
+struct GoOwnerAnswerTests {
+    private final class Dialog: @unchecked Sendable {
+        func answer(_ line: String) -> String {
+            if line.contains("\"menus\"") { return #"{"ok":true,"items":[]}"# }
+            let object: [String: Any] = ["ok": true, "bundleIdentifier": "any.app", "window": ["name": "New folder", "token": "w"],
+                "walkStopReasons": [], "focusChangedDuringWalk": false, "incompleteReads": false,
+                "elements": ["Create", "Cancel"].map { ["role": "AXButton", "name": $0, "nameIsPlausibleLabel": true] as [String: Any] }]
+            return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        }
+    }
+
+    @Test func anAnswerToGosQuestionRefinesTheGoalAndKeepsTheWalkthrough() async {
+        let store = GoGoalStore(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("goal.json"))
+        _ = store.apply(GoGoalRequest(operation: .set, expectedRevision: 0, sourceQuote: "Create a new folder", task: "create a folder"),
+                        heard: "Create a new folder")
+        let app = Dialog()
+        var seen: [(last: String, steps: Int)] = []
+        let coordinator = GoWalkthroughCoordinator(goals: store, answer: { app.answer($0) }, planner: { context in
+            seen.append((context.goal.lastInstruction, context.verifiedSteps.count))
+            if seen.count == 1 { return GoStepProposal(kind: .step, instruction: "Click Create.", targetID: "c0", expected: nil) }
+            if context.goal.lastInstruction == "Create a new folder" {
+                return GoStepProposal(kind: .ask, instruction: "What should it be called? Or I can keep \"Untitled folder\".", targetID: nil, expected: nil)
+            }
+            return GoStepProposal(kind: .done, instruction: "Done.", targetID: nil, expected: nil)
+        }, capture: { nil }, frontmostApp: { "any.app" }, logTransitions: false)
+        _ = await coordinator.start()
+        _ = await coordinator.proceed()          // "I did it" → step recorded, planner asks for a name
+        #expect(coordinator.state.phase == .needsInput)
+        _ = store.apply(GoGoalRequest(operation: .update, sourceQuote: "Call it Receipts"), heard: "Call it Receipts",
+                        boundRevision: store.state.revision)
+        _ = await coordinator.proceed(ownerAnswered: true)
+        #expect(seen.last?.last == "Call it Receipts")
+        #expect(seen.last?.steps == 1)           // the earlier step is kept, not restarted
+        #expect(coordinator.state.phase == .done)
+    }
+}
+
+@MainActor
+struct GoShortTermMemoryTests {
+    private final class Tabs: @unchecked Sendable {
+        func answer(_ line: String) -> String {
+            if line.contains("\"menus\"") { return #"{"ok":true,"items":[]}"# }
+            let object: [String: Any] = ["ok": true, "bundleIdentifier": "any.browser", "window": ["name": "Inbox", "token": "w"],
+                "walkStopReasons": [], "focusChangedDuringWalk": false, "incompleteReads": false,
+                "elements": ["Inbox", "FT"].map { ["role": "AXTab", "name": $0, "nameIsPlausibleLabel": true] as [String: Any] }]
+            return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        }
+    }
+
+    @Test func aFollowUpSeesWhatGoJustPointedAtAndTheEarlierRequest() async {
+        let store = GoGoalStore(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("goal.json"))
+        _ = store.apply(GoGoalRequest(operation: .set, expectedRevision: 0, sourceQuote: "Where is the FT tab", task: "find the FT tab"),
+                        heard: "Where is the FT tab")
+        let app = Tabs()
+        var recentSeen: [[String]] = []
+        let coordinator = GoWalkthroughCoordinator(goals: store, answer: { app.answer($0) }, planner: { context in
+            recentSeen.append(context.recent)
+            return GoStepProposal(kind: .point, instruction: "Here's the FT tab.", targetID: "c1", expected: nil)
+        }, capture: { nil }, frontmostApp: { "any.browser" }, logTransitions: false)
+        _ = await coordinator.start()
+        // "Can you open it?" replaces the goal; the session remembers the earlier request first.
+        coordinator.remember("Earlier request: \u{201C}Where is the FT tab\u{201D}")
+        _ = store.apply(GoGoalRequest(operation: .set, expectedRevision: store.state.revision, sourceQuote: "Can you open it", task: "open it"),
+                        heard: "Can you open it")
+        _ = await coordinator.start()
+        let last = recentSeen.last ?? []
+        #expect(last.contains("Go pointed at tab 'FT'"))
+        #expect(last.contains("Earlier request: \u{201C}Where is the FT tab\u{201D}"))
+    }
+}

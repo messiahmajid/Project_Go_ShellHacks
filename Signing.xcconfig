@@ -1,0 +1,14 @@
+// The app's bundle identifier, kept out of the public project file.
+//
+// Put your own identifier in the git-ignored Signing.local.xcconfig next to
+// this file:
+//
+//     GO_BUNDLE_ID = com.yourname.go
+//
+// A free (Personal Team) registration of an identifier lapses about a week after
+// the last build, and then any team may claim it, so never rely on one that is
+// committed here. Changing it makes macOS treat the app as new: Accessibility,
+// Screen Recording and Microphone must be granted again, and Keychain "Always"
+// rules start empty.
+GO_BUNDLE_ID = com.example.go
+#include? "Signing.local.xcconfig"
