@@ -34,7 +34,9 @@ nonisolated enum GoActiveApp {
 /// instead of a walk of the whole interface, which in a large document takes
 /// about a second. Only compared locally; nothing is kept or logged.
 nonisolated enum GoScreenPulse {
-    static func current() -> Int {
+    /// `structureOnly`: just the app, its windows and the window's top-level parts
+    /// (something opened or closed, a new page), leaving out focus and selection.
+    static func current(structureOnly: Bool = false) -> Int {
         // Unit tests never read the machine running them.
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return 0 }
         var hasher = Hasher()
@@ -60,7 +62,7 @@ nonisolated enum GoScreenPulse {
             hasher.combine(parts.count)
             for part in parts.prefix(40) { hasher.combine(read(part, kAXRoleAttribute) as String?) }
         }
-        if let focused: AXUIElement = read(app, kAXFocusedUIElementAttribute) {
+        if !structureOnly, let focused: AXUIElement = read(app, kAXFocusedUIElementAttribute) {
             describe(focused)
             let selected: [AXUIElement] = read(focused, kAXSelectedCellsAttribute)
                 ?? read(focused, kAXSelectedChildrenAttribute) ?? read(focused, kAXSelectedRowsAttribute) ?? []

@@ -103,10 +103,12 @@ final class GoGuidePresenter {
                 guard GoActiveApp.isActive(step.app) else { return }
                 // A click elsewhere that changes the app (a menu or panel opens, the page
                 // moves on) may be the owner knowing better: plan from there, don't correct.
-                let before = await Task.detached { GoScreenPulse.current() }.value
+                // Only something opening or closing (a menu, dialog, panel or new page)
+                // counts; selecting cells, text or files is ordinary work.
+                let before = await Task.detached { GoScreenPulse.current(structureOnly: true) }.value
                 try? await Task.sleep(for: .milliseconds(900))
                 guard token == self.generation, self.stillWaiting(step), self.isCurrent(state) else { return }
-                let after = await Task.detached { GoScreenPulse.current() }.value
+                let after = await Task.detached { GoScreenPulse.current(structureOnly: true) }.value
                 if before != 0, after != before {
                     self.removeClickMonitor()
                     self.generation = UUID()
@@ -336,9 +338,18 @@ final class GoGuidePresenter {
         }
         let app = step.app
         Task { [weak self] in
+            // A field that already holds something (a default the app picked, like a
+            // data range, or autofill) may just be kept, or changed by selecting
+            // rather than typing: moving on is enough there.
+            var startedFilled: Bool?
             while let self, token == self.generation, !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(300))
-                guard token == self.generation, self.stillWaiting(step), typed else { continue }
+                if startedFilled == nil {
+                    startedFilled = await Task.detached {
+                        GoTextFields.contents(at: rect).map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+                    }.value
+                }
+                guard token == self.generation, self.stillWaiting(step), typed || startedFilled == true else { continue }
                 let (filled, stillHere) = await Task.detached { () -> (Bool?, Bool) in
                     let contents = GoTextFields.contents(at: rect)
                     let focus = GoTextFields.focusFrame(app: app)
