@@ -447,6 +447,8 @@ final class GoWalkthroughCoordinator {
             MeasurementLogFile.appendJSONLine(["kind": "walkthrough", "phase": state.phase.rawValue,
                 "time": Date().timeIntervalSince1970, "session": generation.uuidString,
                 "verifiedStepCount": state.verifiedSteps.count,
+                // The kind of step shown (fill, field, keyboard, control…), never its words.
+                "stepKind": state.step?.kindLabel ?? NSNull(),
                 "askSource": state.phase == .needsInput ? (askSource ?? "planner") : NSNull()], toFileNamed: "go-walkthrough.log")
         }
         onChange?(state)
@@ -534,10 +536,13 @@ final class GoWalkthroughCoordinator {
             // What a menu button, pop-up or disclosure opened (a dropdown, gallery,
             // panel) is often outside the lists: the next plan needs to see it.
             let afterOpener = state.verifiedSteps.last.map(Self.opensSomething) ?? false
+            // Fields without names (PDF and many web forms): only the picture shows
+            // the printed label beside each box.
+            let unnamedFields = observation.fields.contains { $0.label.trimmingCharacters(in: .whitespaces).isEmpty }
             let asked = screenshotNextPlan
             screenshotNextPlan = false
             // A partial read (a very large interface) leans on the screenshot too.
-            if sparse || afterReveal || afterOpener || asked || !observation.complete || visualApps.contains(observation.app) {
+            if sparse || afterReveal || afterOpener || asked || unnamedFields || !observation.complete || visualApps.contains(observation.app) {
                 context.screenshotJPEG = shot?.jpeg
             }
             context.recent = recent.map(\.line)
@@ -766,15 +771,21 @@ final class GoWalkthroughCoordinator {
             generation = UUID(); state = GoWalkthroughState(); notes = []; checklist = []; formQueue = []; goalRevision = goals.state.revision; goalID = goals.activeGoal?.id
         }
         // Resuming after Go's own question ("want me to go ahead?") performs that
-        // step. Taking over a step Go was showing the owner looks again first: they
-        // may have done it, or half of it (text typed), and repeating it would
-        // click twice or type the text on top of theirs.
+        // step. Taking over a step Go was showing performs it too, when the screen
+        // is as it was planned. Only when the screen changed (the owner may have
+        // done it, or part of it) does Go look again, so it never clicks twice,
+        // and never throws away a good step for a second guess.
         let resuming = pausedForQuestion
         autopilot = true
         pausedForQuestion = false
         watch.stop()
         suspended = false
-        if state.phase != .waiting || !resuming { await planNext(generation: generation) }
+        var lookAgain = state.phase != .waiting
+        if state.phase == .waiting, !resuming, let shown = state.step {
+            let now = try? await readObservation(menus: false, expectedApp: shown.app, allowPartial: true)
+            lookAgain = now.map { $0.contextHash != shown.contextHash || $0.windowToken != shown.windowToken } ?? true
+        }
+        if lookAgain { await planNext(generation: generation) }
         var failures = 0
         var notTakingEffect = 0
         var lastDone: (signature: String, context: Int)?
@@ -928,15 +939,14 @@ final class GoWalkthroughCoordinator {
     /// left or the page changed; then the planner looks again.
     private func nextFormField(after done: GoWalkthroughStep) async -> GoWalkthroughStep? {
         guard done.fill, done.app == formApp, !formQueue.isEmpty, let finished = done.field else { return nil }
-        if let index = formQueue.firstIndex(where: { $0.field.label == finished.label && $0.field.role == finished.role }) {
+        if let index = formQueue.firstIndex(where: { Self.sameField($0.field, finished) }) {
             formQueue.removeFirst(index + 1)
         }
         let app = done.app
         let onScreen = await Task.detached { [fields] in fields(app) }.value
         while let entry = formQueue.first {
             formQueue.removeFirst()
-            guard !entry.field.label.isEmpty,
-                  let field = onScreen.first(where: { $0.label == entry.field.label && $0.role == entry.field.role }) else { continue }
+            guard let field = onScreen.first(where: { Self.sameField($0, entry.field) }) else { continue }
             // Filled already (autofill, or done out of order): nothing to do there.
             let frame = field.frame
             let filled = await Task.detached { [fieldHasText] in fieldHasText(frame) }.value
@@ -948,6 +958,15 @@ final class GoWalkthroughCoordinator {
             return step
         }
         return nil
+    }
+
+    /// The same form field on a later read: by name when it has one, else by
+    /// where it sits (PDF and many web forms leave fields unnamed).
+    nonisolated static func sameField(_ a: GoTextField, _ b: GoTextField) -> Bool {
+        guard a.role == b.role else { return false }
+        let nameA = a.label.trimmingCharacters(in: .whitespaces), nameB = b.label.trimmingCharacters(in: .whitespaces)
+        if !nameA.isEmpty || !nameB.isEmpty { return nameA == nameB }
+        return abs(a.frame.midX - b.frame.midX) <= 12 && abs(a.frame.midY - b.frame.midY) <= 12
     }
 
     /// An answer to the owner's question about the step being shown ("what's a

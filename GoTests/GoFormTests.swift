@@ -68,6 +68,47 @@ struct GoFormTests {
         #expect(coordinator.state.step?.control?.name == "Continue")
     }
 
+    @Test func unnamedFieldsAreFollowedByWhereTheySit() async throws {
+        // A PDF form: no field has a name; each is known only by its position.
+        final class PDFForm: @unchecked Sendable {
+            private let lock = NSLock()
+            private var filled: Set<Double> = []
+            let fields = [
+                GoTextField(id: "t0", role: "AXTextField", label: "", focused: true, x: 40, y: 700, w: 400, h: 18),
+                GoTextField(id: "t1", role: "AXTextField", label: "", focused: false, x: 40, y: 660, w: 400, h: 18),
+            ]
+            func fill(_ index: Int) { lock.lock(); filled.insert(fields[index].y); lock.unlock() }
+            func hasText(_ rect: CGRect) -> Bool { lock.lock(); defer { lock.unlock() }; return filled.contains(rect.minY) }
+        }
+        let form = PDFForm(), page = Form()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { page.answer($0) }, planner: { _ in
+            plans += 1
+            var first = GoStepProposal(kind: .step, instruction: "Your name, as on your tax return.", targetID: "t0", expected: nil)
+            first.fill = true
+            first.formFields = [GoFormField(id: "t0", instruction: "Your name, as on your tax return."),
+                                GoFormField(id: "t1", instruction: "Your business name, if it's different.")]
+            return first
+        }, frontmostApp: { "org.test.form" }, fields: { _ in form.fields }, fieldHasText: { form.hasText($0) },
+           logTransitions: false)
+        _ = await coordinator.start()
+        form.fill(0)
+        await coordinator.targetClicked(try #require(coordinator.state.step))
+        #expect(coordinator.state.step?.field?.frame.minY == 660)             // the next box down
+        #expect(coordinator.state.message == "Your business name, if it's different.")
+        #expect(plans == 1)
+    }
+
+    @Test func aFieldIsTheSameByNameOrElseByPlace() {
+        func field(_ label: String, _ x: Double, _ y: Double) -> GoTextField {
+            GoTextField(id: "t", role: "AXTextField", label: label, focused: false, x: x, y: y, w: 200, h: 20)
+        }
+        #expect(GoWalkthroughCoordinator.sameField(field("Email", 0, 0), field("Email", 300, 300)))   // moved, same name
+        #expect(!GoWalkthroughCoordinator.sameField(field("Email", 0, 0), field("Phone", 0, 0)))
+        #expect(GoWalkthroughCoordinator.sameField(field("", 40, 700), field("", 44, 696)))          // unnamed, same place
+        #expect(!GoWalkthroughCoordinator.sameField(field("", 40, 700), field("", 40, 660)))         // unnamed, another box
+    }
+
     @Test func doItForMeHandsTheOwnersDetailsOverQuietly() async {
         let form = Form()
         var performed = 0

@@ -174,20 +174,32 @@ final class GoGuidePresenter {
                 if event.keyCode == 36 || event.keyCode == 76 { returnPressed = true }
             }
         }
+        let app = step.app
         Task { [weak self] in
             var matchedOnce = false
+            var initial: String??
             while let self, token == self.generation, !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(350))
                 guard token == self.generation, self.stillWaiting(step) else { return }
-                let (matched, fieldGone) = await Task.detached { () -> (Bool, Bool) in
-                    let contents = GoTextFields.contents(at: rect)
-                    return (GoTextFields.matches(contents, typeText: text), contents == nil)
+                let (contents, focusHere) = await Task.detached { () -> (String?, Bool) in
+                    (GoTextFields.contents(at: rect), GoTextFields.focusFrame(app: app).map { $0.intersects(rect) } ?? false)
                 }.value
+                if initial == nil { initial = .some(contents) }
+                let matched = GoTextFields.matches(contents, typeText: text)
+                let fieldGone = contents == nil
                 // Two matching reads in a row, so a half-typed word is not taken as done;
                 // a field that closed right after matching (Return) also counts.
                 // After Return the next plan reads the real result, so a fast typist is never left waiting.
-                let finished = needsReturn ? (returnPressed && (matched || matchedOnce || fieldGone))
+                var finished = needsReturn ? (returnPressed && (matched || matchedOnce || fieldGone))
                                            : (matchedOnce && (matched || fieldGone))
+                // The owner typed something of their own (their real name, not the
+                // example) and moved on: that is their answer. Done, without praise.
+                let changedByOwner = contents.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } == true
+                    && initial.map { $0 != contents } == true
+                if !finished, !matched, changedByOwner, !focusHere {
+                    finished = true
+                    self.unconfirmedCompletion = step
+                }
                 if finished {
                     self.removeClickMonitor()
                     self.generation = UUID()

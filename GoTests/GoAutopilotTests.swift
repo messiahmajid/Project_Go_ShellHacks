@@ -125,7 +125,7 @@ struct GoAutopilotTests {
         #expect(coordinator.state.phase == .done)
     }
 
-    @Test func takingOverAShownStepLooksAgainBeforeActing() async {
+    @Test func takingOverAShownStepActsOnItWhenTheScreenIsUnchanged() async {
         let app = App()
         var plans = 0
         let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
@@ -135,13 +135,28 @@ struct GoAutopilotTests {
                 : GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
         }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
         _ = await coordinator.start()                 // Go shows the step to the owner
-        #expect(plans == 1)
-        await coordinator.runForMe { step in           // "do it for me"
+        await coordinator.runForMe { step in           // "do it for me", nothing touched
             await GoStepExecutor.perform(step, answer: { app.answer($0) }, onConfirmationRequired: {})
         }
-        #expect(plans == 3)                            // looked again, then planned after acting
+        #expect(plans == 2)                            // the shown step, then the plan after acting
         #expect(app.actions.count == 1)
         #expect(coordinator.state.phase == .done)
+    }
+
+    @Test func takingOverAfterTheScreenChangedLooksAgainFirst() async {
+        let app = App()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { context in
+            plans += 1
+            if plans == 1 { return GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil) }
+            return GoStepProposal(kind: .done, instruction: "All done.", targetID: nil, expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        _ = await coordinator.start()
+        _ = app.answer(#"{"verb":"press","title":"Open"}"#)   // the owner already did it
+        var performed = 0
+        await coordinator.runForMe { _ in performed += 1; return .done }
+        #expect(plans == 2)                            // looked again instead of clicking twice
+        #expect(performed == 0)
     }
 
     @Test func anActionThatNeverTakesEffectIsHandedOverNotLooped() async {
