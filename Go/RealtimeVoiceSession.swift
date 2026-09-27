@@ -288,15 +288,23 @@ final class RealtimeVoiceSession {
 
     /// Clears a spoken reply's text once it has had time to be read, unless
     /// something newer is showing by then.
+    /// A reply stays long enough to read, then goes: back to the waiting step's
+    /// own instruction if there is one, else the bubble clears. Unless something
+    /// newer replaced it in the meantime.
     private func clearReplyLater(_ shown: String) {
-        let seconds = max(4, Double(shown.split(separator: " ").count) * 0.4 + 2)
+        let seconds = Self.replyLinger(shown)
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
-            guard let self, self.liveTurn == nil, self.walkthrough.state.phase != .waiting,
-                  self.lastShownReply == shown else { return }
-            self.onGuideText?(nil)
+            guard let self, self.liveTurn == nil, self.lastShownReply == shown else { return }
+            let state = self.walkthrough.state
+            self.onGuideText?(state.phase == .waiting ? state.message : nil)
         }
         lastShownReply = shown
+    }
+
+    /// Reading time for a reply: at least 4 s, longer for longer text.
+    nonisolated static func replyLinger(_ text: String) -> Double {
+        max(4, Double(text.split(separator: " ").count) * 0.4 + 2)
     }
     private var lastShownReply: String?
 
@@ -446,6 +454,12 @@ final class RealtimeVoiceSession {
             // A side question hid the pointer; show the pending step again.
             if !guidedThisTurn, walkthrough.state.phase == .waiting { guide.present(walkthrough.state, spoken: false) }
             else if !guidedThisTurn, let shown = liveTurn?.shownReply, !shown.isEmpty { clearReplyLater(shown) }
+            // Go's own one-off replies ("Saved it.", a routines list, an answer about a
+            // field) aren't a step's text, so nothing else would clear them.
+            else if guidedThisTurn, let reply = liveTurn?.marks?.walkthroughReply, !reply.isEmpty,
+                    walkthrough.state.phase != .planning, reply != walkthrough.state.message {
+                clearReplyLater(reply)
+            }
         } catch {
             print("❌ realtime: turn failed: \(error)")
             pendingAutopilot = false

@@ -196,7 +196,9 @@ nonisolated enum RealtimeVoiceVerbs {
         guard !wanted.isEmpty else { return .notInstalled(closest: []) }
         func unique(_ matches: [AppName]) -> [URL] {
             var seen = Set<String>()
-            return matches.map(\.url).filter { seen.insert($0.standardizedFileURL.path).inserted }
+            // A shortcut and the app it points to are one app (/Applications/Safari.app
+            // is a link to where macOS keeps Safari).
+            return matches.map(\.url).filter { seen.insert($0.resolvingSymlinksInPath().standardizedFileURL.path).inserted }
         }
         let fullName = unique(names.filter { $0.isFileName && foldedTokens($0.name) == wanted })
         if fullName.count == 1 { return .resolved(fullName[0]) }
@@ -286,6 +288,11 @@ nonisolated enum RealtimeVoiceVerbs {
             guard let bundleIdentifier = Bundle(url: url)?.bundleIdentifier else { return .notInstalled(closest: []) }
             return .resolved(bundleIdentifier: bundleIdentifier, name: displayName(url))
         case .ambiguous(let urls):
+            // Several copies of one app (the same app ID) aren't a real choice.
+            let identifiers = Set(urls.compactMap { Bundle(url: $0)?.bundleIdentifier })
+            if identifiers.count == 1, let only = identifiers.first, let url = urls.first {
+                return .resolved(bundleIdentifier: only, name: displayName(url))
+            }
             return .ambiguous(candidates: urls.map(displayName))
         case .notInstalled(let closest):
             return .notInstalled(closest: closest.map(displayName))

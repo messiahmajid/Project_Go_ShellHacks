@@ -79,6 +79,29 @@ nonisolated struct GoKeyCombo: Equatable, Sendable {
         ".": 47, "`": 50
     ]
 
+    /// The one shortcut an instruction names in words ("Press Command-T",
+    /// "Cmd+Shift+N", "⌘W", "press Return"), as keys `parse` reads. Nil when it
+    /// names none, or more than one.
+    static func mentioned(in instruction: String) -> String? {
+        var text = instruction.lowercased()
+        for (symbol, word) in [("\u{2318}", "cmd+"), ("\u{21E7}", "shift+"), ("\u{2325}", "option+"), ("\u{2303}", "ctrl+")] {
+            text = text.replacingOccurrences(of: symbol, with: word)
+        }
+        let key = "(?:[a-z0-9]|return|enter|tab|space|escape|esc|delete|up|down|left|right|f[0-9]{1,2})"
+        let combo = "(?:(?:command|cmd|control|ctrl|option|opt|alt|shift)\\s*[-+]\\s*)+" + key + "\\b"
+        let single = "\\bpress (?:the )?(return|enter|tab|escape|esc)\\b"
+        var found = Set<String>()
+        for pattern in [combo, single] {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in expression.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                let range = Range(match.range(at: pattern == single ? 1 : 0), in: text)!
+                let keys = text[range].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: " ", with: "")
+                if parse(keys) != nil { found.insert(keys) }
+            }
+        }
+        return found.count == 1 ? found.first : nil
+    }
+
     /// Nil for anything malformed: unknown names, several keys, or no key.
     static func parse(_ text: String) -> GoKeyCombo? {
         let parts = text.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map(String.init)

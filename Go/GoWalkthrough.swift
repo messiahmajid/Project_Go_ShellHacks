@@ -469,8 +469,10 @@ nonisolated struct GoWalkthroughState: Sendable {
             guard proposal.kind == .step else { return ask("I couldn't form a keyboard step here.", code: "keyboardNotAStep") }
             var text = proposal.typeText
             if text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { text = nil }
-            let combo = proposal.keys.flatMap(GoKeyCombo.parse)
-            if proposal.keys != nil, combo == nil { return ask("I couldn't work out which keys to press.", code: "unknownKeys") }
+            // Keys the planner only named in words ("Press Command-T") still count.
+            let keys = proposal.keys ?? (text == nil ? GoKeyCombo.mentioned(in: proposal.instruction) : nil)
+            let combo = keys.flatMap(GoKeyCombo.parse)
+            if keys != nil, combo == nil { return ask("I couldn't work out which keys to press.", code: "unknownKeys") }
             guard text != nil || combo != nil, (text?.count ?? 0) <= 500 else { return ask("What should I type there?", code: "keyboardNoText") }
             if let refusal = combo?.refusal { return ask(refusal.prefix(1).uppercased() + refusal.dropFirst() + ".", code: "refusedShortcut") }
             var instruction = proposal.instruction
@@ -478,7 +480,7 @@ nonisolated struct GoWalkthroughState: Sendable {
             if let combo, !instruction.contains(combo.display) { instruction += " (\(combo.display))" }
             step = GoWalkthroughStep(instruction: instruction, app: observation.app, windowToken: observation.windowToken,
                                      control: nil, menu: nil, expected: nil, typeText: text, windowName: observation.windowName,
-                                     keys: proposal.keys, keyboard: true)
+                                     keys: keys, keyboard: true)
             message = instruction; phase = .waiting
             firstMatchAt = nil; offTrackAt = nil
             return

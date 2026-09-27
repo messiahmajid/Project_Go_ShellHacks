@@ -32,3 +32,28 @@ struct GoTalkKeyTests {
         #expect(PushToTalkShortcut.ShortcutOption.controlOption.keyCaps.map(\.name) == ["control", "option"])
     }
 }
+
+/// A shortcut the planner only named in words is still pressed; one it didn't
+/// name clearly never is.
+struct GoMentionedShortcutTests {
+    @Test func aShortcutNamedInWordsIsRead() {
+        #expect(GoKeyCombo.mentioned(in: "Press Command-T to open a new tab.") == "command+t")
+        #expect(GoKeyCombo.mentioned(in: "Use Cmd+Shift+N for a new folder.") == "cmd+shift+n")
+        #expect(GoKeyCombo.mentioned(in: "Press \u{2318}W to close it.") == "cmd+w")
+        #expect(GoKeyCombo.mentioned(in: "Then press Return.") == "return")
+    }
+
+    @Test func noShortcutOrTwoOfThemIsNotGuessed() {
+        #expect(GoKeyCombo.mentioned(in: "Click the New Tab button.") == nil)
+        #expect(GoKeyCombo.mentioned(in: "Press Command-C, then Command-V.") == nil)
+    }
+
+    @Test func aKeyboardStepWithoutKeysUsesTheOneItNames() {
+        let observation = GoObservation(app: "any.browser", windowToken: "w", windowName: "Inbox", complete: true, controls: [])
+        var state = GoWalkthroughState()
+        state.accept(GoStepProposal(kind: .step, instruction: "Press Command-T to open a new tab.", targetID: "keyboard", expected: nil),
+                     from: observation)
+        #expect(state.phase == .waiting)
+        #expect(state.step?.keys == "command+t")
+    }
+}
