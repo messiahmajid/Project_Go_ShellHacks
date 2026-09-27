@@ -20,6 +20,16 @@ struct GoScreenTargetTests {
         #expect(observation.screenRect(forBox: nil) == nil)
     }
 
+    @Test func aWideRowInAWindowSizedPictureIsAControlNotTheWholeWindow() {
+        // The picture is often just the app's window: a row of options spans most of its width.
+        var window = GoObservation(app: "any.settings", windowToken: "w", windowName: "Displays", complete: true, controls: [])
+        window.screenFrame = GoFrame(CGRect(x: 400, y: 200, width: 700, height: 600))
+        #expect(window.screenRect(forBox: [300, 50, 380, 950]) != nil)       // a wide row of choices
+        #expect(window.screenRect(forBox: [50, 400, 950, 520]) != nil)       // a tall panel
+        #expect(window.screenRect(forBox: [0, 0, 1000, 1000]) == nil)        // the whole window
+        #expect(window.screenRect(forBox: [100, 100, 900, 900]) == nil)      // most of it
+    }
+
     @Test func aScreenStepPointsAtTheBoxAndFinishesOnAClick() {
         var state = GoWalkthroughState()
         state.accept(GoStepProposal(kind: .step, instruction: "Click the up-arrow Export icon.", targetID: "screen", expected: nil,
@@ -104,6 +114,20 @@ struct GoScreenTargetTests {
         #expect(GoObservation.catalogControls(manyCommands).filter { $0.role == "AXCell" }.count == 50)
         // Short lists are untouched.
         #expect(GoObservation.catalogControls(toolbar) == toolbar)
+    }
+
+    @Test func aLongMenuBarKeepsTheItemsTheRequestNames() {
+        // Like Photoshop: hundreds of items, the one needed in a menu late in the bar.
+        let file = (0..<150).map { GoMenuTarget(id: "m\($0)", path: ["File", "Item \($0)"]) }
+        let edit = (150..<300).map { GoMenuTarget(id: "m\($0)", path: ["Edit", "Command \($0)"]) }
+        let image = [GoMenuTarget(id: "m300", path: ["Image", "Crop"]), GoMenuTarget(id: "m301", path: ["Image", "Trim\u{2026}"]),
+                     GoMenuTarget(id: "m302", path: ["Filter", "Blur", "Gaussian Blur\u{2026}"])]
+        let kept = GoObservation.catalogMenus(file + edit + image, relevantTo: "Where do I crop this image in Photoshop?")
+        #expect(kept.count == 180)
+        #expect(kept.contains { $0.path == ["Image", "Crop"] })               // cut off before
+        #expect(kept.map(\.id) == kept.sorted { Int($0.id.dropFirst())! < Int($1.id.dropFirst())! }.map(\.id))
+        let short = Array(file.prefix(10))
+        #expect(GoObservation.catalogMenus(short, relevantTo: "crop") == short)
     }
 
     @Test func aLongTaskShowsThePlannerEveryEarlierStep() {

@@ -9,8 +9,11 @@ nonisolated enum GoStepExecutor {
         case done
         /// Worth another attempt from a fresh reading of the screen.
         case retryable(String)
-        /// Safety refusal, owner declined, or nothing Go can act on: stop.
+        /// Safety refusal, or nothing Go can act on: stop.
         case blocked(String)
+        /// Go asked the owner first and didn't get a yes (denied, left to expire,
+        /// or they moved on): final. Go stops and leaves things as they are.
+        case declined
     }
 
     /// Types into whatever has focus and/or presses a key combination, in the
@@ -110,6 +113,8 @@ nonisolated enum GoStepExecutor {
                 try? await Task.sleep(for: .milliseconds(RealtimeOpenAppTool.confirmationPollMilliseconds))
                 response = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { answer(ticketLine) }.value)
             } while response["error"] as? String == "confirmationPending" && ProcessInfo.processInfo.systemUptime < deadline
+            // Anything but a yes to Go's own question is a no, never an error to retry around.
+            if response["ok"] as? Bool != true { return .declined }
         }
         // The kernel refused only because the field takes keystrokes, not a value
         // write (Terminal and similar). Type real keys, after command screening.

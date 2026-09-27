@@ -91,8 +91,6 @@ nonisolated enum ActionSafetyKernel {
     static let destructiveActionReasonPrefix = "title suggests a destructive action: "
     static let replaceWouldDiscardReasonPrefix = "replace would discard "
 
-    static let shortSingleLineValueLimit = 200
-
     static let zeroAreaRefusalReason = "listed but not reachable: element has a zero-area frame"
     static let outsideBoundsRefusalReason = "listed but not reachable: element lies outside the visible bounds"
 
@@ -278,13 +276,16 @@ nonisolated enum ActionSafetyKernel {
             }
         }
 
-        // Replacing text in a non-empty field asks first. Short single-line values
-        // (a name, a title) are not destructive, so trusted mode may approve them.
+        // Replacing text in a non-empty field asks first. In a single-line field
+        // (an address bar, a search box, a name or title) that is editing, not
+        // destruction, however long the old value (a long web address is still an
+        // address), so trusted mode may approve it. A multi-line area can hold real
+        // writing, so replacing its text stays destructive.
         if let typing, typing.mode == .replace, typing.currentValueLength > 0 {
             let singleLine = resolvedNode.role == kAXTextFieldRole || resolvedNode.role == kAXComboBoxRole
             return .requireConfirmation(
                 reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength),
-                destructive: !(singleLine && typing.currentValueLength <= Self.shortSingleLineValueLimit)
+                destructive: !singleLine
             )
         }
 

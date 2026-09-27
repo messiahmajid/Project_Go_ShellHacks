@@ -193,10 +193,15 @@ struct GoTypingStepTests {
         #expect(!observed)
     }
 
-    @Test func aTypingStepWithoutTextAsksWhatToType() {
+    @Test func aFieldStepWithoutTextLetsTheOwnerTypeTheirOwnValue() {
+        // No text from the planner: the value is the owner's to choose, so Go points
+        // at the field and lets them type, instead of asking what to type.
         var state = GoWalkthroughState()
-        state.accept(GoStepProposal(kind: .step, instruction: "Type in the Name field.", targetID: "t0", expected: nil), from: observation)
-        #expect(state.phase == .needsInput)
+        state.accept(GoStepProposal(kind: .step, instruction: "Type a name in the Name field.", targetID: "t0", expected: nil), from: observation)
+        #expect(state.phase == .waiting)
+        #expect(state.step?.fill == true)
+        #expect(state.step?.typeText == nil)
+        #expect(state.message == "Type a name in the Name field.")
     }
 
     @Test func quickAnswersAreSpokenNotWalkedThrough() {

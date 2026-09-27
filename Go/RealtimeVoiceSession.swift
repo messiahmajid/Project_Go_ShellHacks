@@ -100,7 +100,11 @@ final class RealtimeVoiceSession {
         }, locate: { [weak self] step in
             guard let self else { return nil }
             return await GoGuidePresenter.locate(step, answer: self.harnessAnswer)
-        }, highlight: { [weak self] rect in self?.onGuideHighlight?(rect) })
+        }, highlight: { [weak self] rect in self?.onGuideHighlight?(rect) },
+        ownerWentAnotherWay: { [weak self] in
+            guard let self, self.liveTurn == nil else { return }
+            Task { await self.walkthrough.followOwnersWay() }
+        })
     private let errorSpeech = AVSpeechSynthesizer()
     private var connection: RealtimeVoiceConnection?
     private var connectTask: Task<RealtimeVoiceConnection, Error>?
@@ -647,9 +651,15 @@ final class RealtimeVoiceSession {
             queueSpeech(text, for: turn)
             return true
         }
-        // While Go waits on its own question, the next words are the answer.
-        if liveTurn === turn, let heard, GoGuidanceIntent.parse(heard) == nil, walkthrough.state.phase == .needsInput,
-           goalStore.activeGoal != nil {
+        // While Go waits on its own question, or is still working out the next step
+        // of a guided walkthrough, the owner's words belong to it: they are the
+        // answer, not a new conversation with the voice model (which doesn't know
+        // the walkthrough and would reply alongside it). "Stop", "no" and new
+        // requests are left to their own handling.
+        let walkthroughListening = walkthrough.state.phase == .needsInput
+            || (walkthrough.state.phase == .planning && !walkthrough.autopilot)
+        if liveTurn === turn, let heard, GoGuidanceIntent.parse(heard) == nil, walkthroughListening,
+           GoGuidanceIntent.yesNo(heard) != false, goalStore.activeGoal != nil {
             marks.goHandlesTurn = true
             let saved = goalStore.apply(GoGoalRequest(operation: .update, sourceQuote: heard), heard: heard,
                                         boundRevision: goalStore.state.revision)

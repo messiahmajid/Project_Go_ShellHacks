@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import CoreServices
 import Foundation
 
 nonisolated enum RealtimeVoiceVerbs {
@@ -218,6 +219,26 @@ nonisolated enum RealtimeVoiceVerbs {
         url.deletingPathExtension().lastPathComponent
     }
 
+    /// Apps anywhere on the Mac whose name contains `query`, from Spotlight. Apps
+    /// inside other apps (helpers) and in the Trash are left out. Blocks: call
+    /// off main.
+    static func spotlightApps(matching query: String) -> [URL] {
+        let name = String(query.filter { !"\"*\\$".contains($0) }.prefix(60)).trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return [] }
+        let text = "kMDItemContentType == \"com.apple.application-bundle\" && kMDItemFSName == \"*\(name)*\"cd"
+        guard let mdQuery = MDQueryCreate(kCFAllocatorDefault, text as CFString, nil, nil),
+              MDQueryExecute(mdQuery, CFOptionFlags(kMDQuerySynchronous.rawValue)) else { return [] }
+        var urls: [URL] = []
+        for index in 0..<min(MDQueryGetResultCount(mdQuery), 20) {
+            guard let raw = MDQueryGetResultAtIndex(mdQuery, index) else { continue }
+            let item = Unmanaged<MDItem>.fromOpaque(raw).takeUnretainedValue()
+            guard let path = MDItemCopyAttribute(item, kMDItemPath) as? String,
+                  !path.contains("/.Trash/"), !path.dropLast(".app".count).contains(".app/") else { continue }
+            urls.append(URL(fileURLWithPath: path, isDirectory: true))
+        }
+        return urls
+    }
+
     /// Every name an installed or running regular app answers to.
     static func installedAppNames() -> [AppName] {
         var names = ApplicationLauncher.searchDirectories.flatMap { directory in
@@ -249,7 +270,16 @@ nonisolated enum RealtimeVoiceVerbs {
         if query.contains("."), !query.contains(" "), let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
             resolution = .resolved(url)
         } else {
-            resolution = resolveApp(named: query, among: installedAppNames())
+            var found = resolveApp(named: query, among: installedAppNames())
+            // Not in the usual folders and not running (an app kept in Downloads,
+            // on another drive, or a developer build): Spotlight knows where it is.
+            if case .notInstalled = found {
+                let spotted = spotlightApps(matching: query)
+                if !spotted.isEmpty {
+                    found = resolveApp(named: query, among: spotted.map { AppName(name: displayName($0), url: $0, isFileName: true) })
+                }
+            }
+            resolution = found
         }
         switch resolution {
         case .resolved(let url):

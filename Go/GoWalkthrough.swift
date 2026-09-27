@@ -100,8 +100,33 @@ nonisolated struct GoObservation: Codable, Equatable, Sendable {
         return kept.sorted { $0.offset < $1.offset }.map(\.element)
     }
 
+    /// The menu items the planner is shown when an app has more than `limit`
+    /// (Photoshop, Office and Xcode have hundreds). Items whose words match the
+    /// request go in first, so the needed command isn't cut off just because its
+    /// menu comes late in the bar; the rest follow in order. On-screen order is kept.
+    static func catalogMenus(_ menus: [GoMenuTarget], relevantTo request: String, limit: Int = 180) -> [GoMenuTarget] {
+        guard menus.count > limit else { return menus }
+        func words(_ text: String) -> Set<String> {
+            let pieces: [String] = text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+            var result = Set<String>()
+            for piece in pieces where piece.count >= 3 {
+                // "images" and "image" are the same word here.
+                result.insert(piece.count > 3 && piece.hasSuffix("s") ? String(piece.dropLast()) : piece)
+            }
+            return result
+        }
+        let wanted = words(request)
+        let indexed = Array(menus.enumerated())
+        let relevant = wanted.isEmpty ? [] : indexed.filter { !words($0.element.path.joined(separator: " ")).isDisjoint(with: wanted) }
+        let chosen = Set(relevant.prefix(limit / 2).map(\.offset))
+        let rest = indexed.filter { !chosen.contains($0.offset) }.prefix(limit - chosen.count)
+        return (indexed.filter { chosen.contains($0.offset) } + rest).sorted { $0.offset < $1.offset }.map(\.element)
+    }
+
     /// A planner box [ymin, xmin, ymax, xmax] on 0–1000 over the screenshot,
-    /// as a screen rectangle. Nil for anything malformed, tiny or implausibly large.
+    /// as a screen rectangle. Nil for anything malformed, tiny, or covering most of
+    /// the picture (a whole window, not a control). A wide row or a tall panel is
+    /// fine: the picture is often just the app's window, not the whole screen.
     func screenRect(forBox box: [Double]?) -> CGRect? {
         guard let box, box.count == 4, box.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1000 }),
               box[0] < box[2], box[1] < box[3], let screen = screenFrame?.rect else { return nil }
@@ -110,7 +135,7 @@ nonisolated struct GoObservation: Codable, Equatable, Sendable {
                           width: (box[3] - box[1]) / 1000 * screen.width,
                           height: (box[2] - box[0]) / 1000 * screen.height)
         guard rect.width >= 4, rect.height >= 4,
-              rect.width <= screen.width * 0.6, rect.height <= screen.height * 0.6 else { return nil }
+              rect.width * rect.height <= screen.width * screen.height * 0.5 else { return nil }
         return rect
     }
 
@@ -355,6 +380,17 @@ nonisolated struct GoWalkthroughState: Sendable {
     /// Set when the last proposal's screenshot box fell on a Dock item or
     /// menu-bar icon its label doesn't name; the coordinator plans again.
     private(set) var boxLandedOn: GoSystemControl?
+    /// Set when the last proposal's screenshot box couldn't be used (malformed,
+    /// tiny or the whole picture); the coordinator plans once more before asking.
+    private(set) var boxRejected = false
+    /// Why the last question was asked: the planner's own question, or which of
+    /// Go's checks stopped the step. Logged as a code only.
+    private(set) var askCode: String?
+
+    init() {}
+
+    /// A state with these steps already done, to replay a recorded test case.
+    init(replaying steps: [GoWalkthroughStep]) { verifiedSteps = steps }
 
     mutating func planning() { phase = .planning; step = nil; firstMatchAt = nil; offTrackAt = nil; offTrackReported = false }
 
@@ -394,16 +430,26 @@ nonisolated struct GoWalkthroughState: Sendable {
         message = "Heads up: \(reason). " + message
     }
     mutating func prefixMessage(_ prefix: String) { if phase == .waiting || phase == .needsInput { message = prefix + message } }
+    /// Asked when Go can't tell which part of the screen the plan means: a
+    /// question the owner can answer by voice.
+    static let cantPlaceIt = "I couldn't tell exactly where that is on screen. What's it called, or what does it look like?"
+
     mutating func stop(_ reason: String) { phase = .stopped; step = nil; message = reason; firstMatchAt = nil }
-    mutating func ask(_ reason: String) { phase = .needsInput; step = nil; message = reason; firstMatchAt = nil }
+    /// Ends the request with a closing line (like an answer), keeping the steps done so far.
+    mutating func finish(_ closing: String) { phase = .done; step = nil; message = closing; firstMatchAt = nil; offTrackAt = nil }
+    /// `code` says why Go is asking, for the log (never the owner's words).
+    mutating func ask(_ reason: String, code: String = "go") {
+        phase = .needsInput; step = nil; message = reason; firstMatchAt = nil; askCode = code
+    }
 
     mutating func accept(_ proposal: GoStepProposal, from observation: GoObservation) {
         app = observation.app
         boxLandedOn = nil
+        boxRejected = false
         guard !proposal.instruction.isEmpty, proposal.instruction.count <= 240 else {
-            return ask("I couldn't form a short, clear next step.")
+            return ask("I couldn't form a short, clear next step.", code: "unclearInstruction")
         }
-        if proposal.kind == .ask { return ask(proposal.instruction) }
+        if proposal.kind == .ask { return ask(proposal.instruction, code: "plannerQuestion") }
         // An answer ends the request: it is final, like done, and its bubble clears.
         if proposal.kind == .answer {
             phase = .done; step = nil; message = proposal.instruction; firstMatchAt = nil; offTrackAt = nil
@@ -420,13 +466,13 @@ nonisolated struct GoWalkthroughState: Sendable {
             return
         }
         if proposal.targetID == "keyboard" {
-            guard proposal.kind == .step else { return ask("I couldn't form a keyboard step here.") }
+            guard proposal.kind == .step else { return ask("I couldn't form a keyboard step here.", code: "keyboardNotAStep") }
             var text = proposal.typeText
             if text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { text = nil }
             let combo = proposal.keys.flatMap(GoKeyCombo.parse)
-            if proposal.keys != nil, combo == nil { return ask("I couldn't work out which keys to press.") }
-            guard text != nil || combo != nil, (text?.count ?? 0) <= 500 else { return ask("What should I type there?") }
-            if let refusal = combo?.refusal { return ask(refusal.prefix(1).uppercased() + refusal.dropFirst() + ".") }
+            if proposal.keys != nil, combo == nil { return ask("I couldn't work out which keys to press.", code: "unknownKeys") }
+            guard text != nil || combo != nil, (text?.count ?? 0) <= 500 else { return ask("What should I type there?", code: "keyboardNoText") }
+            if let refusal = combo?.refusal { return ask(refusal.prefix(1).uppercased() + refusal.dropFirst() + ".", code: "refusedShortcut") }
             var instruction = proposal.instruction
             if let text, !instruction.contains(text) { instruction += " Type \u{201C}\(text)\u{201D}." }
             if let combo, !instruction.contains(combo.display) { instruction += " (\(combo.display))" }
@@ -448,7 +494,8 @@ nonisolated struct GoWalkthroughState: Sendable {
                 rect = system.frame.rect
             } else {
                 guard let boxed = observation.screenRect(forBox: proposal.box) else {
-                    return ask("I couldn't pin down where that is. Can you point me to it?")
+                    boxRejected = true
+                    return ask(Self.cantPlaceIt, code: "boxRejected")
                 }
                 rect = boxed
                 // A box on a listed menu-bar icon or Dock item uses that item's exact frame,
@@ -459,13 +506,13 @@ nonisolated struct GoWalkthroughState: Sendable {
                     rect = snapped.frame.rect; label = plannedLabel ?? snapped.name; outside = true; outsideName = snapped.name
                 case .offTarget(let item):
                     boxLandedOn = item
-                    return ask("I couldn't pin down where that is. Can you point me to it?")
+                    return ask(Self.cantPlaceIt, code: "boxOnSystemItem")
                 case .none:
                     break
                 }
             }
             guard proposal.kind == .step || proposal.kind == .point else {
-                return ask("I couldn't pin down where that is. Can you point me to it?")
+                return ask(Self.cantPlaceIt, code: "boxWrongKind")
             }
             var text = proposal.typeText?.trimmingCharacters(in: .whitespacesAndNewlines)
             if text?.isEmpty == true { text = nil }
@@ -484,7 +531,7 @@ nonisolated struct GoWalkthroughState: Sendable {
         }
         if proposal.kind == .launch {
             guard let name = proposal.app?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty, name.count <= 80,
-                  UntrustedText(name).isPlausibleControlLabel else { return ask("Which app should I open?") }
+                  UntrustedText(name).isPlausibleControlLabel else { return ask("Which app should I open?", code: "launchNoApp") }
             step = GoWalkthroughStep(instruction: proposal.instruction, app: observation.app, windowToken: observation.windowToken,
                                      control: nil, menu: nil, expected: nil, launchApp: name)
             message = proposal.instruction; phase = .waiting
@@ -493,7 +540,7 @@ nonisolated struct GoWalkthroughState: Sendable {
         }
         if proposal.kind == .done {
             // Completion is only credible after at least one step really happened.
-            guard !verifiedSteps.isEmpty else { return ask("Is that done, or is there more to do?") }
+            guard !verifiedSteps.isEmpty else { return ask("Is that done, or is there more to do?", code: "doneWithoutSteps") }
             phase = .done; step = nil; message = proposal.instruction; firstMatchAt = nil; offTrackAt = nil
             return
         }
@@ -515,8 +562,17 @@ nonisolated struct GoWalkthroughState: Sendable {
                 firstMatchAt = nil; offTrackAt = nil
                 return
             }
+            // No text from the planner means the value is the owner's to choose (a
+            // size, a ratio, a name): point at the field and let them type it, rather
+            // than asking what to type.
             guard let text = proposal.typeText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text.count <= 120 else {
-                return ask("What would you like to type there?")
+                var fillStep = GoWalkthroughStep(instruction: proposal.instruction, app: observation.app, windowToken: observation.windowToken,
+                                                 control: nil, menu: nil, expected: nil, field: field)
+                fillStep.fill = true
+                step = fillStep
+                message = proposal.instruction; phase = .waiting
+                firstMatchAt = nil; offTrackAt = nil
+                return
             }
             var instruction = proposal.instruction
             if !instruction.localizedCaseInsensitiveContains(text) { instruction += " Type \u{201C}\(text)\u{201D}." }
@@ -530,15 +586,15 @@ nonisolated struct GoWalkthroughState: Sendable {
             return
         }
         // A partial read can still name a real target; only expected states need a complete one.
-        guard let id = proposal.targetID else { return ask("I couldn't find a control for the next step here.") }
+        guard let id = proposal.targetID else { return ask("I couldn't find a control for the next step here.", code: "noTarget") }
         // A predicted result is optional: clicks on the pointed target complete steps.
         // One that already holds (or cannot change) is dropped, not treated as a failure.
         let expected = proposal.expected.flatMap { $0.canObserveChange(from: observation) ? $0 : nil }
         let control = observation.controls.first { $0.id == id }
         let menu = observation.menus.first { $0.id == id }
-        guard control != nil || menu != nil else { return ask("That control is no longer available.") }
+        guard control != nil || menu != nil else { return ask("That control is no longer available.", code: "targetGone") }
         if let control, observation.matches(role: control.role, name: control.name).count != 1 {
-            return ask("More than one control matches. Please identify the one you mean.")
+            return ask("More than one control matches. Please identify the one you mean.", code: "ambiguousTarget")
         }
         step = GoWalkthroughStep(instruction: proposal.instruction, app: observation.app, windowToken: observation.windowToken,
                                  control: control, menu: menu, expected: expected)

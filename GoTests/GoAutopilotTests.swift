@@ -277,7 +277,7 @@ struct GoAutopilotTests {
            frontmostApp: { "org.test.any-app" }, logTransitions: false)
         _ = await stubborn.start()
         #expect(stubborn.state.phase == .needsInput)
-        #expect(stubborn.state.message == "I can't find that on screen right now. Can you point me to it, or ask me again?")
+        #expect(stubborn.state.message == "I can't find that on screen right now. What's it called, or what does it look like?")
     }
 
     @Test func afterTheOwnerDoesAHandedBackStepGoCarriesOnByItself() async throws {
@@ -297,6 +297,36 @@ struct GoAutopilotTests {
         #expect(resumed == 1)
         #expect(coordinator.state.step?.control?.name == "Continue")
         #expect(coordinator.pausedForQuestion)                  // acts on that fresh step, no second plan
+    }
+
+    @Test func whenTheOwnerGoesAnotherWayGoPlansFromThereWithoutCorrecting() async {
+        let app = App()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { _ in
+            plans += 1
+            return plans == 1
+                ? GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+                : GoStepProposal(kind: .step, instruction: "Now click Continue.", targetID: "c1", expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        _ = await coordinator.start()
+        _ = app.answer(#"{"verb":"press","title":"Open"}"#)   // the owner's own click changed the app
+        await coordinator.followOwnersWay()
+        #expect(plans == 2)
+        #expect(coordinator.state.message == "Now click Continue.")        // no "Not quite"
+    }
+
+    @Test func aNoToGosQuestionEndsTheRunQuietly() async {
+        let app = App()
+        var plans = 0
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { app.answer($0) }, planner: { _ in
+            plans += 1
+            return GoStepProposal(kind: .step, instruction: "Click Open.", targetID: "c0", expected: nil)
+        }, frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        await coordinator.runForMe { _ in .declined }            // the card wasn't approved
+        #expect(plans == 1)                                     // no replanning around a no
+        #expect(coordinator.state.phase == .done)
+        #expect(coordinator.state.message == "Okay, I've left it as it is.")
+        #expect(!coordinator.autopilot)
     }
 
     @Test func controlsThatOpenSomethingAreKnown() {

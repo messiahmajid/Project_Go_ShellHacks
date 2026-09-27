@@ -824,7 +824,7 @@ private let wholeScreen = CGRect(x: 0, y: 0, width: 1920, height: 1200)
     #expect(decide(currentValueLength: 0) == .allow)
 }
 
-@Test func replacingAShortSingleLineValueAsksButIsNotDestructive() async throws {
+@Test func replacingASingleLineValueAsksButIsNotDestructive() async throws {
     func decide(role: String, length: Int) -> SafetyDecision {
         ActionSafetyKernel.evaluate(
             intent: ElementActionIntent(role: nil, title: "Name", action: .type),
@@ -837,9 +837,10 @@ private let wholeScreen = CGRect(x: 0, y: 0, width: 1920, height: 1200)
     // "Untitled folder" in a name box: still a question (so trusted mode may approve it), never destruction.
     #expect(decide(role: "AXTextField", length: 15)
         == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 15), destructive: false))
-    // A long value, or any multi-line area, is a document and stays destructive.
-    #expect(decide(role: "AXTextField", length: 201)
-        == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 201), destructive: true))
+    // A long web address in an address bar is still just an address: editing, not destruction.
+    #expect(decide(role: "AXTextField", length: 480)
+        == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 480), destructive: false))
+    // Any multi-line area can hold real writing, and stays destructive.
     #expect(decide(role: "AXTextArea", length: 15)
         == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 15), destructive: true))
 }

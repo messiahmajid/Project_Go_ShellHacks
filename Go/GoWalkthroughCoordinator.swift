@@ -242,6 +242,19 @@ final class GoWalkthroughCoordinator {
         return ["AXMenuButton", "AXPopUpButton", "AXComboBox", "AXDisclosureTriangle"].contains(step.control?.role ?? "")
     }
 
+    /// What a proposal targets, as a kind for the log: a listed control, menu,
+    /// field or Dock/menu-bar item, a screen box, the keyboard, or nothing listed.
+    nonisolated static func targetKind(of proposal: GoStepProposal, in catalog: GoObservation) -> String {
+        guard let id = proposal.targetID else { return "none" }
+        if id == "screen" { return "screenBox" }
+        if id == "keyboard" { return "keyboard" }
+        if catalog.controls.contains(where: { $0.id == id }) { return "control" }
+        if catalog.menus.contains(where: { $0.id == id }) { return "menu" }
+        if catalog.fields.contains(where: { $0.id == id }) { return proposal.fill == true ? "fillField" : "field" }
+        if catalog.systemControls.contains(where: { $0.id == id }) { return "systemControl" }
+        return "unlisted"
+    }
+
     /// Keeps a new planner note: trimmed, at most 280 characters, not a repeat,
     /// and only the latest 10.
     nonisolated static func addingNote(_ note: String?, to notes: [String]) -> [String] {
@@ -449,7 +462,7 @@ final class GoWalkthroughCoordinator {
                 "verifiedStepCount": state.verifiedSteps.count,
                 // The kind of step shown (fill, field, keyboard, control…), never its words.
                 "stepKind": state.step?.kindLabel ?? NSNull(),
-                "askSource": state.phase == .needsInput ? (askSource ?? "planner") : NSNull()], toFileNamed: "go-walkthrough.log")
+                "askSource": state.phase == .needsInput ? (askSource ?? state.askCode ?? "planner") : NSNull()], toFileNamed: "go-walkthrough.log")
         }
         onChange?(state)
     }
@@ -503,7 +516,7 @@ final class GoWalkthroughCoordinator {
     private func planNext(generation token: UUID, prefix: String? = nil, attempt: Int = 0) async {
         watch.stop()
         guard token == generation, goalRevision == goals.state.revision, let goal = goals.activeGoal else { return }
-        guard state.verifiedSteps.count < 50 else { state.ask("Let's check the goal before continuing."); publish(); return }
+        guard state.verifiedSteps.count < 50 else { state.ask("Let's check the goal before continuing.", code: "stepLimit"); publish(); return }
         askSource = nil
         state.planning(); publish()
         do {
@@ -521,7 +534,8 @@ final class GoWalkthroughCoordinator {
             guard token == generation, goalRevision == goals.state.revision else { return }
             let catalog = GoObservation(app: observation.app, windowToken: observation.windowToken, windowName: observation.windowName,
                                         complete: observation.complete, controls: GoObservation.catalogControls(observation.controls),
-                                        menus: Array(observation.menus.prefix(180)), fields: observation.fields,
+                                        menus: GoObservation.catalogMenus(observation.menus, relevantTo: goal.rawGoal + " " + goal.lastInstruction),
+                                        fields: observation.fields,
                                         screenFrame: observation.screenFrame, systemControls: observation.systemControls)
             var context = GoPlanningContext(goal: goal, observation: catalog,
                                             verifiedSteps: Array(state.verifiedSteps.suffix(8)),
@@ -608,7 +622,9 @@ final class GoWalkthroughCoordinator {
                     "checklistChanged": proposal.checklist != nil,
                     "providerMs": proposal.usage?.providerMs ?? -1, "promptTokens": proposal.usage?.promptTokens ?? -1,
                     "imageTokens": proposal.usage?.imageTokens ?? -1, "thinkingTokens": proposal.usage?.thinkingTokens ?? -1,
-                    "outputTokens": proposal.usage?.outputTokens ?? -1], toFileNamed: "go-walkthrough.log")
+                    "outputTokens": proposal.usage?.outputTokens ?? -1,
+                    // What the planner answered, as kinds only: the answer and what it targeted.
+                    "proposalKind": proposal.kind.rawValue, "target": Self.targetKind(of: proposal, in: catalog)], toFileNamed: "go-walkthrough.log")
             }
             guard token == generation, goalRevision == goals.state.revision, !Task.isCancelled else { return }
             // Launch steps name an app, and screen steps a box on the screenshot
@@ -623,10 +639,10 @@ final class GoWalkthroughCoordinator {
                     remember("Go's last plan named a control that isn't listed; choose from the lists, or box it on the screenshot.")
                     screenshotNextPlan = true
                     return await replan(token, prefix: prefix, attempt: attempt,
-                                        reason: "I can't find that on screen right now. Can you point me to it, or ask me again?")
+                                        reason: "I can't find that on screen right now. What's it called, or what does it look like?")
                 }
-                askSource = "targetNotObserved"
-                state.ask("I can't find that on screen right now. Can you point me to it, or ask me again?"); publish(); return
+                state.ask("I can't find that on screen right now. What's it called, or what does it look like?", code: "targetNotObserved")
+                publish(); return
             }
             // Recheck the same interface after the network call. The proposal's
             // IDs belong to the earlier catalogue and must not be reinterpreted.
@@ -646,6 +662,7 @@ final class GoWalkthroughCoordinator {
             observation = settled
             proposal = settledProposal
             state.accept(proposal, from: observation)
+            GoRunRecorder.record(context: context, observation: observation, proposal: proposal, state: state)
             if let item = state.boxLandedOn {
                 // The box fell on a Dock or menu-bar item the plan didn't mean: say so
                 // to the planner and look again, rather than act on another app.
@@ -653,8 +670,17 @@ final class GoWalkthroughCoordinator {
                 remember("A screen box fell on \(place) \u{201C}\(item.name)\u{201D}, which was not the target; "
                          + "box the target inside the app's own window.")
                 askSource = "boxOnSystemItem"
-                return await replan(token, prefix: prefix, attempt: attempt,
-                                    reason: "I couldn't pin down where that is. Can you point me to it?")
+                return await replan(token, prefix: prefix, attempt: attempt, reason: GoWalkthroughState.cantPlaceIt)
+            }
+            if state.boxRejected {
+                // An unusable box (malformed, tiny, or the whole picture): one more look,
+                // told why, before asking the owner.
+                askSource = "boxRejected"
+                if attempt == 0 {
+                    remember("Go's last screen box couldn't be used (malformed, tiny, or most of the picture); box only the control itself, tightly.")
+                    screenshotNextPlan = true
+                    return await replan(token, prefix: prefix, attempt: attempt, reason: GoWalkthroughState.cantPlaceIt)
+                }
             }
             state.stamp(observation.contextHash, windowFrame: observation.windowFrame)
             // A screenshot box is an estimate: use the exact frame of the control under it.
@@ -705,6 +731,16 @@ final class GoWalkthroughCoordinator {
 
     /// The owner really is somewhere else and cannot be pointed back:
     /// plan from here, falling back to the pending step if that fails.
+    /// The owner clicked something other than the pointed control and the app
+    /// changed: plan the next step from this screen, without "not quite" (their
+    /// way may have been right; the next plan judges).
+    func followOwnersWay() async {
+        guard state.phase == .waiting, !suspended, !autopilot else { return }
+        let token = generation
+        state.planning(); publish()
+        await planNext(generation: token)
+    }
+
     func replanFromHere() async {
         guard state.phase == .waiting, !suspended else { return }
         let token = generation
@@ -751,7 +787,7 @@ final class GoWalkthroughCoordinator {
                 state.restore(lastStep, message: phrases.say(.goBack) + " " + lastStep.instruction)
                 publish(); armWatch(); return
             }
-            askSource = "readOrPlanFailed"; state.ask(reason); publish(); return
+            state.ask(reason, code: askSource ?? "readOrPlanFailed"); publish(); return
         }
         try? await Task.sleep(for: .milliseconds(400))
         guard token == generation else { return }
@@ -857,6 +893,13 @@ final class GoWalkthroughCoordinator {
                 // Self-correct: read the screen again and choose again.
                 state.planning(); publish()
                 await planNext(generation: token)
+            case .declined:
+                // The owner said no (or didn't say yes) to Go's own question: that ends it.
+                autopilot = false
+                askSource = nil
+                state.finish("Okay, I've left it as it is.")
+                publish()
+                return
             case .retryable(let reason), .blocked(let reason):
                 autopilot = false
                 askSource = "autopilotStopped"

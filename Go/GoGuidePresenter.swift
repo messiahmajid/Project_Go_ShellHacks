@@ -17,6 +17,9 @@ final class GoGuidePresenter {
     private let locate: Resolve?
     /// Moves or hides the highlight without flying the cursor again.
     private let highlight: @MainActor (CGRect?) -> Void
+    /// The owner clicked elsewhere and the app changed: they went another way
+    /// (maybe the right one); Go plans from the new screen instead of correcting.
+    private let ownerWentAnotherWay: @MainActor () -> Void
     /// The target's current on-screen frame, kept up to date while the step waits.
     private var trackedRect: CGRect?
     /// Where the target was when the tracker last hid it, and when.
@@ -39,7 +42,8 @@ final class GoGuidePresenter {
          isCurrent: @escaping @MainActor (GoWalkthroughState) -> Bool = { _ in true },
          stillWaiting: @escaping @MainActor (GoWalkthroughStep) -> Bool = { _ in false },
          targetClicked: @escaping @MainActor (GoWalkthroughStep) -> Void = { _ in },
-         locate: Resolve? = nil, highlight: @escaping @MainActor (CGRect?) -> Void = { _ in }) {
+         locate: Resolve? = nil, highlight: @escaping @MainActor (CGRect?) -> Void = { _ in },
+         ownerWentAnotherWay: @escaping @MainActor () -> Void = {}) {
         self.resolve = resolve; self.speak = speak; self.stopSpeech = stopSpeech
         self.showText = showText; self.point = point
         self.isCurrent = isCurrent
@@ -47,6 +51,7 @@ final class GoGuidePresenter {
         self.targetClicked = targetClicked
         self.locate = locate
         self.highlight = highlight
+        self.ownerWentAnotherWay = ownerWentAnotherWay
     }
 
     func cancel() {
@@ -95,10 +100,22 @@ final class GoGuidePresenter {
                     }
                     return
                 }
-                guard
-                      GoActiveApp.isActive(step.app),
-                      Date().timeIntervalSince(self.lastNudge) > 4 else { return }
-                try? await Task.sleep(for: .milliseconds(2500))
+                guard GoActiveApp.isActive(step.app) else { return }
+                // A click elsewhere that changes the app (a menu or panel opens, the page
+                // moves on) may be the owner knowing better: plan from there, don't correct.
+                let before = await Task.detached { GoScreenPulse.current() }.value
+                try? await Task.sleep(for: .milliseconds(900))
+                guard token == self.generation, self.stillWaiting(step), self.isCurrent(state) else { return }
+                let after = await Task.detached { GoScreenPulse.current() }.value
+                if before != 0, after != before {
+                    self.removeClickMonitor()
+                    self.generation = UUID()
+                    self.ownerWentAnotherWay()
+                    return
+                }
+                // Nothing changed: a real miss. Point back to the target.
+                guard Date().timeIntervalSince(self.lastNudge) > 4 else { return }
+                try? await Task.sleep(for: .milliseconds(1600))
                 guard token == self.generation, self.stillWaiting(step), self.isCurrent(state) else { return }
                 self.lastNudge = Date()
                 await self.nudge(state, step: step)
