@@ -16,7 +16,7 @@ And this isn't just a "for us" thing. It's for anyone who's ever been lost in a 
 
 ## What it does
 
-Hold the **right Option** key, say what you want, let go. (Rather use Control + Option? Switch it in the menu bar panel.)
+Hold the **right Option** key, say what you want, let go. 
 
 - **"How do I make a pivot table?"** The cursor flies to the right spot, highlights it, and walks you through one step at a time. It notices when you click and moves on. Click the wrong thing and it'll nudge you back.
 - **"Turn on Do Not Disturb."** Say it like a request instead of a question and Go just does it for you, checking that each step actually worked.
