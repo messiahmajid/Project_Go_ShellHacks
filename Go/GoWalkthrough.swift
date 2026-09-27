@@ -555,7 +555,9 @@ nonisolated struct GoWalkthroughState: Sendable {
                 return
             }
             // A field the owner fills with their own details: the instruction says what goes there.
-            if proposal.fill == true {
+            // Text the planner gave always wins: it came from the owner's words, so Go types it.
+            let givenText = proposal.typeText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if proposal.fill == true, givenText?.isEmpty ?? true {
                 var fillStep = GoWalkthroughStep(instruction: proposal.instruction, app: observation.app, windowToken: observation.windowToken,
                                                  control: nil, menu: nil, expected: nil, field: field)
                 fillStep.fill = true

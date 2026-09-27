@@ -343,9 +343,12 @@ final class GoWalkthroughCoordinator {
 
     /// Go never reads its own interface. When Go's panel is in front, the owner
     /// means the app they were just using: bring it back before reading.
+    /// With no such app (asking from an empty desktop), Finder, which owns the
+    /// desktop, takes the front.
     private func frontOwnersApp() async {
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier,
-              let app = (lastOwnerApp.flatMap { $0.isTerminated ? nil : $0 }) ?? Self.appOwningFrontWindow() else { return }
+              let app = (lastOwnerApp.flatMap { $0.isTerminated ? nil : $0 }) ?? Self.appOwningFrontWindow()
+                ?? NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else { return }
         app.activate()
         for _ in 0..<10 where NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
             try? await Task.sleep(for: .milliseconds(40))
@@ -469,6 +472,45 @@ final class GoWalkthroughCoordinator {
 
     /// `allowPartial`: planning may use a read that hit the walk's size or time
     /// limits (very large interfaces); checking that a step happened never does.
+    /// Harness answers that mean "there's no window here to read".
+    nonisolated static let noWindowErrors: Set<String> = ["noFocusedWindow", "targetIsHarnessItself", "noRootNode"]
+
+    /// The screen when no app window can be read: the app in front (Finder when
+    /// it's Go itself or nothing), with no window controls. Menus, menu-bar icons,
+    /// the Dock and the screenshot are added as for any planning read.
+    nonisolated static func desktopObservation() -> GoObservation {
+        let own = Bundle.main.bundleIdentifier
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let app = front == nil || front == own ? "com.apple.finder" : front!
+        return GoObservation(app: app, windowToken: "desktop", windowName: "Desktop", complete: true, controls: [])
+    }
+
+    /// A harness request that can't hold Go up: an app that doesn't answer within
+    /// `limit` gives nil, and Go carries on (tries again, then says the app isn't
+    /// responding) instead of freezing. Reads slower than 3 s are logged by verb.
+    /// How long a planning read may take before Go stops waiting (shorter in tests).
+    var readTimeLimit: Duration = .seconds(10)
+
+    private func timedHarness(_ line: String, verb: String) async -> String? {
+        let limit = readTimeLimit
+        let answer = self.answer
+        let started = ContinuousClock.now
+        // Whichever comes first, the answer or the limit. A stuck read can't be
+        // cancelled, so it is left to finish on its own; Go doesn't wait for it.
+        let result: String? = await withCheckedContinuation { continuation in
+            let first = FirstAnswer(continuation)
+            Task.detached { first.give(answer(line)) }
+            Task.detached { try? await Task.sleep(for: limit); first.give(nil) }
+        }
+        let elapsed = ContinuousClock.now - started
+        if logTransitions, elapsed > .seconds(3) {
+            let ms = Int(elapsed.components.seconds * 1000) + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+            MeasurementLogFile.appendJSONLine(["kind": "slowRead", "time": Date().timeIntervalSince1970, "verb": verb,
+                                               "ms": ms, "timedOut": result == nil], toFileNamed: "go-walkthrough.log")
+        }
+        return result
+    }
+
     /// How long the last planning read spent on the element walk and on the
     /// rest (menus, fields, Dock and menu-bar icons), for the timing log.
     private var lastReadSplit: (walkMs: Int, extrasMs: Int)?
@@ -479,9 +521,18 @@ final class GoWalkthroughCoordinator {
         if let expectedApp { request["expectApp"] = expectedApp }
         let line = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)
         let answer = self.answer
-        let response = await Task.detached { answer(line) }.value
-        guard var observation = GoObservation.decode(RealtimeOpenAppTool.harnessResponseObject(response)),
-              observation.complete || allowPartial else {
+        guard let response = await timedHarness(line, verb: "snapshot") else {
+            throw GoVoiceFailure(kind: "walkthrough:appNotResponding")
+        }
+        let object = RealtimeOpenAppTool.harnessResponseObject(response)
+        var decoded = GoObservation.decode(object)
+        // No window to read (the empty desktop, an app with its windows closed, or
+        // Go itself in front): planning still has the menus, the menu-bar icons,
+        // the Dock and the screenshot, which is all a question about the Mac needs.
+        if decoded == nil, menus, Self.noWindowErrors.contains(object["error"] as? String ?? "") {
+            decoded = Self.desktopObservation()
+        }
+        guard var observation = decoded, observation.complete || allowPartial else {
             throw GoVoiceFailure(kind: "walkthrough:unreadableInterface")
         }
         let walkedAt = ProcessInfo.processInfo.systemUptime
@@ -492,7 +543,8 @@ final class GoWalkthroughCoordinator {
         let systemTask: Task<[GoSystemControl], Never>? = menus ? Task.detached { GoSystemControls.current() } : nil
         if menus {
             let menuLine = String(decoding: try JSONSerialization.data(withJSONObject: ["verb": "menus", "expectApp": observation.app]), as: UTF8.self)
-            let menuResponse = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { answer(menuLine) }.value)
+            // Menus are extra: an app that doesn't answer in time just has none this read.
+            let menuResponse = RealtimeOpenAppTool.harnessResponseObject(await timedHarness(menuLine, verb: "menus") ?? "")
             if menuResponse["ok"] as? Bool == true {
                 let items = menuResponse["items"] as? [[String: Any]] ?? []
                 observation.menus = items.enumerated().compactMap { index, item in
@@ -724,8 +776,11 @@ final class GoWalkthroughCoordinator {
         } catch {
             guard token == generation else { return }
             // Right after a click the app is often mid-change; read again before giving up.
+            let notResponding = (error as? GoVoiceFailure)?.kind == "walkthrough:appNotResponding"
+            if notResponding { askSource = "appNotResponding" }
             await replan(token, prefix: prefix, attempt: attempt,
-                         reason: "I couldn't read or plan this step reliably. Please try again from the relevant window.")
+                         reason: notResponding ? "That app isn't responding to me right now. Give it a moment, then ask me again."
+                                               : "I couldn't get a clear look at the screen just then. Click the window you're working in, then ask me again.")
         }
     }
 
@@ -1112,5 +1167,19 @@ final class GoWalkthroughCoordinator {
         } else if state.noteOffTrack(observation, now: now()) {
             onOffTrack?(state)
         }
+    }
+}
+
+/// Resumes a continuation once, with whichever answer arrives first.
+private final class FirstAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String?, Never>?
+    init(_ continuation: CheckedContinuation<String?, Never>) { self.continuation = continuation }
+    func give(_ value: String?) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }

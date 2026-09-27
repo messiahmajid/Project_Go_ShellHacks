@@ -95,3 +95,11 @@ struct GoStepQuestionTests {
     }
 }
 
+
+/// A wrong click gets a short spoken correction; the bubble keeps the full step.
+struct GoNudgeTests {
+    @Test func theSpokenNudgeIsShort() {
+        #expect(GoGuidePresenter.spokenNudge("Not quite.") == "Not quite, it's here.")
+        #expect(GoGuidePresenter.spokenNudge("Almost, not that one.") == "Almost, not that one, it's here.")
+    }
+}

@@ -84,6 +84,12 @@ final class GoGuidePresenter {
         trackedRect = rect
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
             let location = NSEvent.mouseLocation
+            // Which app the click was in, read as the button goes down: a click that
+            // opens a panel run by another process (Control Center, a menu-bar
+            // extra, Notification Center) has moved focus there a moment later.
+            // Menu-bar icons and Dock items are reachable from any app, so clicks
+            // are judged wherever they happen.
+            let clickedInStepApp = step.outsideWindow || GoActiveApp.isActive(step.app)
             Task { @MainActor [weak self] in
                 // The target as it is now; while it is off screen, clicks are not judged.
                 // The target as it is now, or where it was a moment ago if the tracker just
@@ -92,7 +98,7 @@ final class GoGuidePresenter {
                       let target = (self.trackedRect ?? self.recentlySeenRect)?.insetBy(dx: -12, dy: -12) else { return }
                 if target.contains(location) {
                     // A click on a menu title only opens the menu; the item inside finishes the step.
-                    if isFinal, GoActiveApp.isActive(step.app) || step.menu != nil {
+                    if isFinal, clickedInStepApp || step.menu != nil {
                         self.removeClickMonitor()
                         // Stops menu following and nudges; speech and the bubble stay until the next step.
                         self.generation = UUID()
@@ -100,7 +106,16 @@ final class GoGuidePresenter {
                     }
                     return
                 }
-                guard GoActiveApp.isActive(step.app) else { return }
+                guard clickedInStepApp else { return }
+                // Beside a menu-bar icon or Dock item there's no "other way" inside an
+                // app: a click elsewhere (usually another icon opening its own panel)
+                // is a miss, flagged at once.
+                if step.outsideWindow {
+                    guard self.stillWaiting(step), Date().timeIntervalSince(self.lastNudge) > 4 else { return }
+                    self.lastNudge = Date()
+                    await self.nudge(state, step: step)
+                    return
+                }
                 // A click elsewhere that changes the app (a menu or panel opens, the page
                 // moves on) may be the owner knowing better: plan from there, don't correct.
                 // Only something opening or closing (a menu, dialog, panel or new page)
@@ -115,10 +130,8 @@ final class GoGuidePresenter {
                     self.ownerWentAnotherWay()
                     return
                 }
-                // Nothing changed: a real miss. Point back to the target.
+                // Nothing changed: a real miss. Point back to the target straight away.
                 guard Date().timeIntervalSince(self.lastNudge) > 4 else { return }
-                try? await Task.sleep(for: .milliseconds(1600))
-                guard token == self.generation, self.stillWaiting(step), self.isCurrent(state) else { return }
                 self.lastNudge = Date()
                 await self.nudge(state, step: step)
             }
@@ -465,18 +478,29 @@ final class GoGuidePresenter {
     }
 
     /// Points back at where the target is now, never at a stale spot.
+    /// A short spoken correction right away ("Not quite, it's here."), with the
+    /// full instruction in the bubble. The pointer goes back to where the target
+    /// was last seen at once, then to its exact place when the fresh read returns.
     private func nudge(_ state: GoWalkthroughState, step: GoWalkthroughStep) async {
         let token = generation
-        let fresh = await (locate ?? resolve)(step)
-        guard token == generation else { return }
-        let text = phrases.say(.offTrack) + " " + state.message
+        let phrase = phrases.say(.offTrack)
+        let text = phrase + " " + state.message
         stopSpeech()
         showText(text)
-        if let fresh { trackedRect = fresh; point(fresh, text) } else { highlight(nil) }
+        if let known = trackedRect ?? recentlySeenRect { point(known, text) }
         task = Task { [weak self] in
             guard let self, token == self.generation else { return }
-            try? await self.speak(text)
+            try? await self.speak(Self.spokenNudge(phrase))
         }
+        let fresh = await (locate ?? resolve)(step)
+        guard token == generation else { return }
+        if let fresh { trackedRect = fresh; point(fresh, text) } else { highlight(nil) }
+    }
+
+    /// "Not quite." becomes "Not quite, it's here."
+    nonisolated static func spokenNudge(_ phrase: String) -> String {
+        let trimmed = phrase.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        return trimmed + ", it's here."
     }
 
     func present(_ state: GoWalkthroughState, spoken: Bool) {
@@ -614,7 +638,7 @@ final class GoGuidePresenter {
     static func locate(_ step: GoWalkthroughStep, answer: @escaping @Sendable (String) -> String) async -> CGRect? {
         if step.control != nil { return await resolve(step, answer: answer, log: false) }
         // Menu-bar icons and Dock items don't move with the app's window.
-        if step.outsideWindow, let frame = step.screenRect?.rect { return GoActiveApp.isActive(step.app) ? frame : nil }
+        if step.outsideWindow, let frame = step.screenRect?.rect { return frame }
         guard let frame = step.screenRect?.rect ?? step.field?.frame,
               GoActiveApp.isActive(step.app) else { return nil }
         let line = String(decoding: (try? JSONSerialization.data(withJSONObject: ["verb": "snapshot", "expectApp": step.app])) ?? Data(), as: UTF8.self)

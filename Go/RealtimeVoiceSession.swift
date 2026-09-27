@@ -90,7 +90,11 @@ final class RealtimeVoiceSession {
             guard let self else { return }
             self.onGuideText?(text)
         }, point: { [weak self] rect, text in self?.onGuidePoint?(rect, text) },
-        isCurrent: { state in state.app == nil || state.app.map(GoActiveApp.isActive) == true },
+        // A menu-bar icon or Dock item can be reached from any app, so its step
+        // stays current when another app or panel comes forward.
+        isCurrent: { state in
+            state.app == nil || state.step?.outsideWindow == true || state.app.map(GoActiveApp.isActive) == true
+        },
         stillWaiting: { [weak self] step in
             guard let state = self?.walkthrough.state else { return false }
             return state.phase == .waiting && state.step == step

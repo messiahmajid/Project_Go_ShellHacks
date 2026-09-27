@@ -193,6 +193,16 @@ struct GoTypingStepTests {
         #expect(!observed)
     }
 
+    @Test func textThePlannerGaveIsTypedEvenIfItAlsoSaidFill() {
+        // "Called Call my mom": the owner said it, so Go types it.
+        var state = GoWalkthroughState()
+        var proposal = GoStepProposal(kind: .step, instruction: "Type the event title.", targetID: "t0", expected: nil, typeText: "Call my mom")
+        proposal.fill = true
+        state.accept(proposal, from: observation)
+        #expect(state.step?.fill == false)
+        #expect(state.step?.typeText == "Call my mom")
+    }
+
     @Test func aFieldStepWithoutTextLetsTheOwnerTypeTheirOwnValue() {
         // No text from the planner: the value is the owner's to choose, so Go points
         // at the field and lets them type, instead of asking what to type.

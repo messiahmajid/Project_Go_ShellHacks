@@ -329,6 +329,19 @@ struct GoAutopilotTests {
         #expect(!coordinator.autopilot)
     }
 
+    @Test func anAppThatStopsAnsweringDoesNotFreezeGo() async {
+        // Every read hangs, like an app stuck half-way through opening a pop-up.
+        let coordinator = GoWalkthroughCoordinator(goals: goals(), answer: { _ in usleep(3_000_000); return "{}" },
+                                                   planner: { _ in GoStepProposal(kind: .done, instruction: "Done.", targetID: nil, expected: nil) },
+                                                   frontmostApp: { "org.test.any-app" }, logTransitions: false)
+        coordinator.readTimeLimit = .milliseconds(200)
+        let started = ContinuousClock.now
+        _ = await coordinator.start()
+        #expect(ContinuousClock.now - started < .seconds(2.9))       // gave up well before the stuck reads ended
+        #expect(coordinator.state.phase == .needsInput)
+        #expect(coordinator.state.message.hasPrefix("That app isn't responding to me right now."))
+    }
+
     @Test func controlsThatOpenSomethingAreKnown() {
         func step(_ role: String) -> GoWalkthroughStep {
             GoWalkthroughStep(instruction: "Click it.", app: "a", windowToken: "w",
